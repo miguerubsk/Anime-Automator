@@ -17,11 +17,10 @@ import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 
-import requests
-
 from ..core.config import tmp_dir
 from ..core.errors import DestinationWriteError, SourceContentError
 from ..core.nas import assert_nas_mounted
+from ..core.netblock import get_with_bypass
 from ..core.util import format_duration, safe_name
 from ..library.folders import Library
 from ..library.quality import lower_copies_for, remove_lower_quality_copies
@@ -68,7 +67,7 @@ class HttpSource(EpisodeSource):
         raw.parent.mkdir(parents=True, exist_ok=True)
         name, ep = item.target["name"], item.episode
         log.info("Descargando %s -> %s", item.url, raw)
-        with requests.get(item.url, stream=True, timeout=60, headers=BROWSER_HEADERS) as r:
+        with get_with_bypass(item.url, cfg, stream=True, timeout=60, headers=BROWSER_HEADERS) as r:
             r.raise_for_status()
             total = int(r.headers.get("Content-Length") or 0)
             done = 0

@@ -1,5 +1,7 @@
 """Tipos de error del dominio y su clasificación (¿merece la pena reintentar?)."""
 
+import html
+
 import requests
 
 # Códigos HTTP que indican un problema del lado del servidor / temporal
@@ -50,3 +52,27 @@ def is_unreachable_server(exc: Exception) -> bool:
     """Temporal y de conexión (el servidor no contesta), no un código HTTP ni la NAS."""
     return is_temporary_download_error(exc) and not isinstance(
         exc, (DestinationWriteError, requests.exceptions.HTTPError))
+
+
+def describe_error(exc: Exception, for_html: bool = True) -> str:
+    """
+    El error en una línea para los avisos (Telegram, requester-bot); escapado
+    para HTML salvo `for_html=False` (requester-bot lo escapa él). Los de requests traen la URL entera partida y el
+    repr de urllib3, que en Telegram se ven como un enlace roto.
+    """
+    from .util import url_host
+    req = getattr(exc, "request", None)
+    host = url_host(getattr(req, "url", "") or "") or "el servidor"
+    if isinstance(exc, requests.exceptions.SSLError):
+        text = (f"certificado no válido en {host} (¿IP bloqueada por LaLiga?)"
+                if "CERTIFICATE_VERIFY_FAILED" in str(exc) else f"error SSL con {host}")
+    elif isinstance(exc, requests.exceptions.Timeout):
+        text = f"{host} no responde (tiempo de espera agotado)"
+    elif isinstance(exc, requests.exceptions.ConnectionError):
+        text = f"no se pudo conectar con {host}"
+    elif http_status(exc) is not None:
+        reason = getattr(exc.response, "reason", "") or ""
+        text = f"{host} respondió HTTP {http_status(exc)} {reason}".strip()
+    else:
+        text = str(exc) or type(exc).__name__
+    return html.escape(text, quote=False) if for_html else text

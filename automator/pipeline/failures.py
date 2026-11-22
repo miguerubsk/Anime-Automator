@@ -15,11 +15,14 @@ el capítulo (Disposition); si no, pasa al siguiente. El orden importa:
 Para añadir un caso nuevo basta una clase más en la lista (abierto/cerrado).
 """
 
+import html
 import logging
 import random
+import urllib.parse
 from dataclasses import dataclass
 
-from ..core.errors import SourceContentError, is_temporary_download_error, is_unreachable_server
+from ..core.errors import (SourceContentError, describe_error, is_temporary_download_error,
+                           is_unreachable_server)
 from ..core.util import format_duration
 from ..sources.japanpaw import alternative_link
 from .backoff import compute_retry_delay_seconds
@@ -38,6 +41,14 @@ RELINK_DELAY_HOURS = 24
 # con errores de conexión, cada cuántos intentos se mira si la ficha tiene
 # otro enlace (otro servidor) para ese capítulo
 CONNECTION_ALT_EVERY = 4
+
+
+def link_to(url: str | None, text: str = "enlace") -> str:
+    """<a> para Telegram con la URL bien escapada (espacios, corchetes...)."""
+    if not url or not url.startswith(("http://", "https://")):
+        return ""
+    safe = urllib.parse.quote(url, safe=":/?&=%#@!$'()*+,;~")
+    return f' (<a href="{html.escape(safe)}">{text}</a>)'
 
 
 @dataclass(frozen=True)
@@ -102,10 +113,11 @@ class TemporaryErrorHandler(FailureHandler):
         # a partir del 4º intento, para no saturar Telegram en cortes largos,
         # solo se avisa de vez en cuando (el log registra cada intento)
         report(item.key, "episode_retry",
-               f"⏳ Error temporal con <b>{item.title}</b> {item.label} (intento {item.attempt}): {e}\n"
+               f"⏳ Error temporal con <b>{item.title}</b> {item.label} (intento {item.attempt}): "
+               f"{describe_error(e)}{link_to(item.url)}\n"
                f"Se reintentará en ~{format_duration(delay)}.",
                notify_if=item.attempt <= 3 or item.attempt % 6 == 0,
-               attempt=item.attempt, error=str(e), delay=format_duration(delay))
+               attempt=item.attempt, error=describe_error(e, for_html=False), delay=format_duration(delay))
         return HELD
 
 
@@ -157,9 +169,10 @@ class RelinkLaterHandler(FailureHandler):
         log.info("%s %s sin enlace válido: vuelvo a mirar la ficha en %s (%s/%s)",
                  item.title, item.label, format_duration(delay), relinks + 1, RELINK_MAX)
         report(item.key, "episode_retry",
-               f"🔗 <b>{item.title}</b> {item.label}: el enlace no funciona ({ctx.exc}) y no hay "
+               f"🔗 <b>{item.title}</b> {item.label}: el enlace no funciona ({describe_error(ctx.exc)})"
+               f"{link_to(item.url)} y no hay "
                f"alternativa. Vuelvo a mirar la ficha en ~{format_duration(delay)} ({relinks + 1}/{RELINK_MAX}).",
-               attempt=relinks + 1, error=str(ctx.exc), delay=format_duration(delay))
+               attempt=relinks + 1, error=describe_error(ctx.exc, for_html=False), delay=format_duration(delay))
         return HELD
 
 
@@ -168,8 +181,9 @@ class GiveUpHandler(FailureHandler):
         item = ctx.item
         BatchProgress().failed(item.folder, item.episode)
         report(item.key, "episode_failed",
-               lambda: f"❌ Error procesando <b>{item.title}</b> {item.label}: {ctx.exc}{BatchProgress().block()}",
-               error=str(ctx.exc))
+               lambda: (f"❌ Error procesando <b>{item.title}</b> {item.label}: {describe_error(ctx.exc)}"
+                        f"{link_to(item.url)}{BatchProgress().block()}"),
+               error=describe_error(ctx.exc, for_html=False))
         return RELEASED
 
 
