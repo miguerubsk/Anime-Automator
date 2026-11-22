@@ -1,0 +1,111 @@
+"""
+Películas.
+
+Una película de una serie que ya está en la biblioteca va a la carpeta de
+esa serie (como "Película 01.mkv" / "Película - Subtítulo.mkv", igual que
+las que ya hay en Overlord o Inuyasha); una película original va a
+<anime_root>/<movies_dirname> con su título como nombre.
+"""
+
+import re
+from pathlib import Path
+
+from . import files
+from .naming import folder_safe, name_key, norm_words, trim_name
+
+MOVIE_MARKER_RE = re.compile(r"\b(?:the\s+)?(?:movie|gekijou?ban|pel[ií]cula|film)\b", re.IGNORECASE)
+MOVIE_NUMBER_RE = re.compile(r"\b(?:movie|gekijou?ban|pel[ií]cula|film)\s*0*(\d{1,2})\b", re.IGNORECASE)
+_MOVIE_PREFIX_RE = re.compile(r"^\s*pel[ií]cula\b\s*(?:-\s*)?", re.IGNORECASE)
+
+
+def looks_like_movie_title(title: str) -> bool:
+    return bool(MOVIE_MARKER_RE.search(title))
+
+
+def movie_file_name(title: str) -> str:
+    """Nombre dentro de la carpeta de la serie: "Película 02" o "Película - Reze-hen"."""
+    m = MOVIE_NUMBER_RE.search(title)
+    if m:
+        return f"Película {int(m.group(1)):02d}.mkv"
+    cut = [i for i in (title.find(":"), title.find(" - ")) if i >= 0]
+    if cut:
+        sub = title[min(cut):].lstrip(":- ").strip()
+        sub = trim_name(MOVIE_MARKER_RE.sub("", sub))
+        if sub:
+            return f"Película - {folder_safe(sub)}.mkv"
+    return "Película.mkv"
+
+
+class MovieLibrary:
+    def __init__(self, cfg: dict):
+        self.cfg = cfg
+        self.root = Path(cfg["anime_root"])
+        self.movies_dirname = cfg.get("movies_dirname", "PELICULAS")
+
+    def find_series_folder(self, title: str) -> Path | None:
+        """
+        Carpeta de la biblioteca cuyo nombre sea el principio del título de la
+        película ("Overlord" para "Overlord Movie 1 - Fushisha no Ou"), por
+        palabras completas y quedándose con la coincidencia más larga. Se
+        respetan también los overrides de config.yaml.
+        """
+        words = norm_words(title)
+        for a in self.cfg.get("animes") or []:
+            if norm_words(a["watch_title"]) == words:
+                return files.base_of(Path(a["folder"]))
+        try:
+            entries = list(self.root.iterdir())
+        except OSError:
+            return None
+        # claves de cada principio del título que acaba en palabra completa:
+        # "Dandadan Movie" -> {"dandadan": 1}; así "Dan Da Dan" también casa
+        prefixes = {}
+        for i in range(1, len(words)):  # tiene que sobrar título (si es idéntico, es una peli original)
+            prefixes.setdefault(name_key(" ".join(words[:i])), i)
+        best, best_len = None, 0
+        for d in entries:
+            if d.name == self.movies_dirname or not d.is_dir():
+                continue
+            dk = name_key(d.name)
+            # mínimo 4 letras para no casar carpetas tipo "K" o "86" por casualidad
+            if len(dk) < 4 or dk not in prefixes:
+                continue
+            if len(dk) > best_len:
+                best, best_len = d, len(dk)
+        return best
+
+    def destination(self, title: str) -> tuple[Path, str, bool]:
+        """(carpeta, nombre_archivo, es_de_una_serie)"""
+        series_folder = self.find_series_folder(title)
+        if series_folder is not None:
+            return series_folder, movie_file_name(title), True
+        return self.root / self.movies_dirname, folder_safe(title) + ".mkv", False
+
+
+def movie_copies(folder: Path, filename: str) -> list[Path]:
+    """
+    Archivos de vídeo de la carpeta que son esa película: el nombre exacto o
+    uno equivalente (name_key) con o sin el prefijo "Película" (así se
+    reconoce "Mugen Ressha-hen.mkv" aunque ahora se nombraría
+    "Película - Mugen Ressha-hen.mkv").
+    """
+    def keys(text):
+        return {k for k in (name_key(text), name_key(_MOVIE_PREFIX_RE.sub("", text))) if len(k) >= 4}
+
+    stem = Path(filename).stem
+    wanted = keys(stem)
+    try:
+        candidates = [f for f in folder.iterdir() if files.is_video(f) and f.is_file()]
+    except OSError:
+        return []
+    return [f for f in candidates if f.stem == stem or keys(f.stem) & wanted]
+
+
+def already_have_movie(folder: Path, filename: str) -> bool:
+    """¿Ya está esa película en .mkv?"""
+    return any(files.is_mkv(f) for f in movie_copies(folder, filename))
+
+
+def movie_other_copies(folder: Path, filename: str) -> list[Path]:
+    """Copias de la película en otros formatos (.mp4, .avi...)."""
+    return [f for f in movie_copies(folder, filename) if not files.is_mkv(f)]

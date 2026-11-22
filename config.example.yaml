@@ -1,0 +1,127 @@
+# ============================================================
+# Configuración de Anime-Automator (ejemplo)
+#
+#   cp config.example.yaml config.yaml   # y ajústalo a tu NAS
+#
+# Las rutas son las de DENTRO del contenedor (ver los volúmenes de
+# compose.example.yml). Los valores "${VARIABLE}" se sustituyen por las
+# variables de entorno (.env). Se puede editar sin reiniciar: el servicio
+# vuelve a leer el archivo en cuanto cambia.
+# ============================================================
+
+# Carpeta temporal (volumen persistente): descargas a medias, remux y el
+# estado que sobrevive a reinicios (cola, reintentos, torrents, peticiones)
+tmp_dir: "/data/tmp"
+
+# Chrome headless del propio stack (servicio browser-sockpuppet-chrome)
+sockpuppet_browser_url: "ws://browser-sockpuppet-chrome:3000"
+
+# ------------------------------------------------------------
+# Biblioteca
+# ------------------------------------------------------------
+anime_root: "/nuevo-pool/Anime"
+
+# Carpeta con enlaces a las series que se están emitiendo
+emision_root: "/nuevo-pool/Anime_Emisión"
+
+# Películas originales (las de una serie que ya está en la biblioteca van a la
+# carpeta de esa serie como "Película NN.mkv" / "Película - Subtítulo.mkv")
+movies_dirname: "PELICULAS"   # dentro de anime_root
+
+# Si la NAS no permite crear symlinks por SMB, los enlaces de emisión se crean
+# en la propia NAS por SSH. La clave pública de ./ssh/id_ed25519.pub tiene que
+# estar en ~/.ssh/authorized_keys de ese usuario en la NAS. Sin esta sección,
+# se avisa por Telegram con el comando para crear el enlace a mano.
+nas_ssh:
+  host: "nas.local"
+  port: 22
+  user: "usuario"
+  key_file: "/config/ssh/id_ed25519"
+  # ruta de la carpeta de emisión vista DESDE LA NAS (por defecto, la misma
+  # que emision_root)
+  # emision_path: "/ruta/en/la/nas/Emision"
+
+# Archivo que SOLO existe en la NAS real (créalo una vez desde el host con
+# `touch <montaje de la NAS>/.nas_mount_ok`). Si no está, se asume que el
+# montaje ha fallado y no se crea ni escribe nada (así no se llena el disco
+# local por error). Vacío = no se comprueba.
+nas_sentinel_file: "/nuevo-pool/.nas_mount_ok"
+
+# Cómo se muestran las rutas en los avisos (Telegram, bot de administración,
+# requester-bot): la que ven los usuarios por SMB en vez de la interna.
+# Lista de [prefijo interno, cómo se muestra]; se aplica el primero que
+# coincida, así que los más concretos van primero.
+display_paths:
+  # - ["/nuevo-pool/CarpetaEnLaNas/", "NombreDelShare/"]
+  - ["/nuevo-pool/", ""]      # /nuevo-pool/Anime/X/07.mkv -> Anime/X/07.mkv
+
+# ------------------------------------------------------------
+# japan-paw.net
+# ------------------------------------------------------------
+# Sufijo que change-detection añade al título de la ficha; se quita antes de
+# derivar el nombre de la carpeta.
+site_title_suffix: "- Japan-Paw! Descarga Calidad"
+
+# Al elegir entre las pestañas de descarga de una ficha:
+#   1. Resolución más alta (hasta max_resolution, si se indica)
+#   2. Tipo de fuente: BD > DL > Web > TV
+#   3. Grupo preferido
+preferred_group: "Erai-raws"
+# max_resolution: 1080        # opcional: por encima, solo si no hay otra cosa
+
+# Se conservan: audio japonés + un audio en español (España o, si no hay,
+# latino) y UN subtítulo en español (España > latino). Cuando la pista dice
+# solo "spa"/"es", estas palabras (sin distinguir mayúsculas, buscadas en el
+# nombre de la pista) deciden si es de España o latina.
+spain_keywords: ["españa", "espana", "castellano", "es-es", "spain", "spa"]
+latino_keywords: ["latino", "latin", "es-419", "hispanoamérica", "hispanoamerica"]
+
+# ------------------------------------------------------------
+# Avisos
+# ------------------------------------------------------------
+telegram:
+  bot_token: "${TELEGRAM_BOT_TOKEN}"
+  chat_id: "${TELEGRAM_CHAT_ID}"
+
+# ------------------------------------------------------------
+# Reintentos ante errores TEMPORALES (conexión, certificado, 429/5xx, la NAS
+# sin montar): sin límite de intentos, con espera creciente hasta un tope.
+# Ante un error que no se arregla solo (404...) se prueba otro enlace de la
+# ficha y, si no, nyaa.si.
+# ------------------------------------------------------------
+download_retry:
+  initial_delay_minutes: 5     # espera antes del primer reintento
+  backoff_multiplier: 2        # cada reintento espera el doble que el anterior
+  max_delay_hours: 6           # tope de espera
+  # cupo del servidor de descarga agotado: cada capítulo espera por su cuenta
+  # y en cuanto uno se descarga bien, los del mismo servidor se prueban ya
+  quota_status_codes: [403]
+  quota_initial_delay_minutes: 30
+  quota_max_delay_hours: 18
+  jitter: 0.25                 # ±25 % al azar, para que no reintenten a la vez
+
+# ------------------------------------------------------------
+# Fallback: el capítulo en nyaa.si, por torrent con Transmission
+# ------------------------------------------------------------
+nyaa_fallback:
+  enabled: true
+  base_url: "https://nyaa.si"
+  category: "1_2"              # Anime - English-translated
+  notify_on_use: true          # avisar cada vez que se use
+
+transmission:
+  host: "nas.local"
+  port: 9091
+  username: "${TRANSMISSION_USER}"
+  password: "${TRANSMISSION_PASS}"
+  # La carpeta de descarga y el ratio de siembra son los que tenga configurados
+  # Transmission; al terminar de sembrar, el torrent se borra con sus datos.
+  torrent_wait_timeout_hours: 48   # si tarda más, se avisa y se abandona
+
+# ------------------------------------------------------------
+# Carpetas fijadas a mano (opcional): solo si la carpeta que se deduce del
+# título no es la buena. Tiene prioridad sobre todo lo demás.
+# ------------------------------------------------------------
+animes: []
+#  - watch_title: "Nombre exacto tal como lo manda change-detection - Japan-Paw! Descarga Calidad"
+#    folder: "/nuevo-pool/Anime/Nombre Real De La Carpeta/Temporada 2"

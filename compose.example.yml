@@ -1,0 +1,62 @@
+# Ejemplo de docker compose para Anime-Automator.
+#
+#   cp compose.example.yml compose.yml
+#   cp .env.example .env               # y rellénalo
+#   cp config.example.yaml config.yaml # y ajústalo a tu NAS
+#   # si usas los enlaces de emisión por SSH: la clave en ./ssh/id_ed25519
+#   docker compose up -d --build
+#
+# Las rutas de config.yaml (anime_root, emision_root, tmp_dir...) son las de
+# DENTRO del contenedor: tienen que coincidir con los volúmenes de abajo.
+
+services:
+  anime-automator:
+    build: .
+    container_name: anime-automator
+    restart: unless-stopped
+    ports:
+      - "5000:5000"          # webhook de change-detection, /download, /check, /seasons, /health
+    environment:
+      # avisos por Telegram
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      # Transmission (fallback de nyaa.si)
+      - TRANSMISSION_USER=${TRANSMISSION_USER:-}
+      - TRANSMISSION_PASS=${TRANSMISSION_PASS:-}
+      # avisos por capítulo de las peticiones hechas desde requester-bot (vacío = desactivado)
+      - REQUESTER_CALLBACK_URL=${REQUESTER_CALLBACK_URL:-}
+      - REQUESTER_CALLBACK_SECRET=${REQUESTER_CALLBACK_SECRET:-}
+      # bot de administración (descargas y gestión de la cola; vacío = desactivado)
+      - ADMIN_BOT_TOKEN=${ADMIN_BOT_TOKEN:-}
+      - ADMIN_BOT_CHAT_IDS=${ADMIN_BOT_CHAT_IDS:-}
+      - CONFIG_PATH=/config/config.yaml
+      - TZ=Europe/Madrid        # horas de los logs en hora local
+    volumes:
+      - ./config.yaml:/config/config.yaml:ro
+      - ./ssh:/config/ssh:ro    # clave para crear los enlaces de emisión en la NAS por SSH
+      # la biblioteca (montaje de la NAS en el host) -> rutas de config.yaml
+      - /ruta/del/montaje/de/la/nas:/nuevo-pool
+      # estado persistente (cola, reintentos, torrents, peticiones) y temporales
+      - anime-automator-tmp:/data/tmp
+    depends_on:
+      browser-sockpuppet-chrome:
+        condition: service_started
+
+  # Chrome headless para leer las fichas de japan-paw.net (protegidas por
+  # Cloudflare). En config.yaml: sockpuppet_browser_url: "ws://browser-sockpuppet-chrome:3000"
+  browser-sockpuppet-chrome:
+    image: dgtlmoon/sockpuppetbrowser:latest
+    container_name: anime-automator-browser
+    hostname: browser-sockpuppet-chrome
+    cap_add:
+      - SYS_ADMIN        # puede que no haga falta en tu plataforma
+    restart: unless-stopped
+    environment:
+      - SCREEN_WIDTH=1920
+      - SCREEN_HEIGHT=1080
+      - SCREEN_DEPTH=16
+      - MAX_CONCURRENT_CHROME_PROCESSES=2
+    # sin puertos al host: solo anime-automator le habla, por la red interna
+
+volumes:
+  anime-automator-tmp:

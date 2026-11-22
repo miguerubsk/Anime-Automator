@@ -1,0 +1,18 @@
+# secretos y configuración local (en el repo van compose.example.yml y .env.example)
+.env
+compose.yml
+config.yaml
+ssh/
+
+# copias de seguridad e imágenes
+bak.*
+*.bak*
+*.tar.xz
+*.img
+
+# scripts locales
+*.sh
+
+# Python
+__pycache__/
+*.py[cod]
