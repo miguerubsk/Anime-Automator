@@ -1,0 +1,102 @@
+{
+ "jobs": {
+  "23": {
+   "job_id": "23",
+   "name": "100-man no Inochi no Ue ni Ore wa Tatteiru",
+   "title": "100-man no Inochi no Ue ni Ore wa Tatteiru - Japan-Paw! Descarga Calidad",
+   "kind": "series",
+   "pending": [
+    1,
+    2
+   ],
+   "done": [
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12
+   ],
+   "failed": [],
+   "sealed": true,
+   "finished": false,
+   "watch_url": ""
+  },
+  "54": {
+   "job_id": "54",
+   "name": "Tsuihō Sareta Cheat Fuyo Majutsushi wa Kimama na Second Life wo Ōka Suru",
+   "title": "Tsuihou Sareta Cheat Fuyo Majutsushi wa Kimama na Second Life wo Ouka Suru.: Ore wa Buki dake ja Naku, Arayuru Mono ni \"Kyouka Point\" wo Fuyo Dekiru shi, Ore no Ishi de Itsudemo Kouka wo Kaijo Dekiru kedo, Nokotta Hitotachi Daijoubu? - Japan-Paw! Descarga Calidad",
+   "kind": "series",
+   "pending": [
+    1,
+    2,
+    4,
+    5,
+    7
+   ],
+   "done": [
+    3,
+    6
+   ],
+   "failed": [],
+   "sealed": true,
+   "finished": false,
+   "watch_url": ""
+  }
+ },
+ "keys": [
+  [
+   [
+    "/nuevo-pool/Anime/100-man no Inochi no Ue ni Ore wa Tatteiru",
+    1
+   ],
+   "23"
+  ],
+  [
+   [
+    "/nuevo-pool/Anime/100-man no Inochi no Ue ni Ore wa Tatteiru",
+    2
+   ],
+   "23"
+  ],
+  [
+   [
+    "/nuevo-pool/Anime/Tsuihō Sareta Cheat Fuyo Majutsushi wa Kimama na Second Life wo Ōka Suru",
+    1
+   ],
+   "54"
+  ],
+  [
+   [
+    "/nuevo-pool/Anime/Tsuihō Sareta Cheat Fuyo Majutsushi wa Kimama na Second Life wo Ōka Suru",
+    2
+   ],
+   "54"
+  ],
+  [
+   [
+    "/nuevo-pool/Anime/Tsuihō Sareta Cheat Fuyo Majutsushi wa Kimama na Second Life wo Ōka Suru",
+    4
+   ],
+   "54"
+  ],
+  [
+   [
+    "/nuevo-pool/Anime/Tsuihō Sareta Cheat Fuyo Majutsushi wa Kimama na Second Life wo Ōka Suru",
+    5
+   ],
+   "54"
+  ],
+  [
+   [
+    "/nuevo-pool/Anime/Tsuihō Sareta Cheat Fuyo Majutsushi wa Kimama na Second Life wo Ōka Suru",
+    7
+   ],
+   "54"
+  ]
+ ]
+}

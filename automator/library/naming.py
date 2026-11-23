@@ -98,8 +98,14 @@ def name_key(text: str) -> str:
     t = "".join(c for c in t if not unicodedata.combining(c)).casefold()
     t = t.replace("&", "and")
     t = re.sub(r"[\W_]+", "", t)
-    t = re.sub(r"o[ou]", "o", t)   # ou / oo -> o
-    t = re.sub(r"u+", "u", t)      # uu -> u
+    # ou / oo -> o y uu -> u, hasta que no quede nada: sin espacios, una vocal
+    # larga puede pegarse a la palabra anterior ("wo Ouka" -> "woouka", que
+    # tiene que dar lo mismo que "wo Ōka" -> "wooka")
+    prev = None
+    while prev != t:
+        prev = t
+        t = re.sub(r"o[ou]", "o", t)
+        t = re.sub(r"u+", "u", t)
     return t
 
 

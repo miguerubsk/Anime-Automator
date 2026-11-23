@@ -38,6 +38,10 @@ class NamingTest(unittest.TestCase):
     def test_name_key_equivalences(self):
         self.assertEqual(name_key("Dan Da Dan"), name_key("Dandadan"))
         self.assertEqual(name_key("Maoyū Maō Yūsha"), name_key("Maoyuu Maou Yuusha"))
+        # la vocal larga pegada a la palabra anterior al quitar los espacios
+        self.assertEqual(name_key("Tsuihō Sareta Cheat Fuyo Majutsushi wa Kimama na Second Life wo Ōka Suru"),
+                         name_key("Tsuihou Sareta Cheat Fuyo Majutsushi wa Kimama na Second Life wo Ouka Suru"))
+        self.assertEqual(name_key("Kono Oto Tomare"), name_key("Kono Otō Tomare"))
 
 
 class SourcesParsingTest(unittest.TestCase):
