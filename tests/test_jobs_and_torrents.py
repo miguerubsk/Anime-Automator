@@ -29,6 +29,19 @@ class JobTrackerTest(AutomatorTestCase):
         events = [(p["event"], p.get("episode"), p.get("done")) for p in t2.outbox._items]
         self.assertEqual(events, [("episode_done", 1, 1), ("episode_done", 2, 2), ("job_complete", None, [1, 2])])
 
+    def test_watch_job_mirrors_events_but_keeps_own_notifications(self):
+        from automator.pipeline.jobs import JobTracker
+        t = JobTracker()
+        job = t.new_watch_job("https://paste.japan-paw.net/?v=7", "Serie", "Serie - X")
+        key = self.item("S", 9).key
+        t.attach(job, key)
+        t.seal(job)
+        self.assertFalse(t.event(key, "episode_done"))   # False: el Telegram propio avisa igual
+        events = [(p["event"], p["watch_url"]) for p in t.outbox._items]
+        self.assertEqual(events, [("episode_done", "https://paste.japan-paw.net/?v=7")] * 1
+                         + [("job_complete", "https://paste.japan-paw.net/?v=7")])
+        self.assertTrue(job.job_id.startswith("watch:"))
+
     def test_no_tracking_without_callback_url(self):
         from automator.pipeline.jobs import JobTracker
         os.environ["REQUESTER_CALLBACK_URL"] = ""

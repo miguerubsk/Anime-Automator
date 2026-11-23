@@ -6,6 +6,11 @@ los capítulos de esa petición no se notifican por el Telegram propio: cada
 evento (capítulo hecho/fallido/reintento/fallback y el final del trabajo)
 se envía a requester-bot, que avisa a quien lo pidió y al admin.
 
+Los capítulos que llegan por el webhook de change-detection son trabajos
+«observados» (watch_url): se notifican por el Telegram propio como siempre
+y, además, sus eventos van a requester-bot con la URL vigilada, para que
+avise a los clientes que siguen ese anime cada semana.
+
 Tanto los trabajos como la bandeja de salida se guardan en disco: tras un
 corte de luz se sigue sabiendo a qué petición pertenece cada capítulo, y los
 avisos que no se llegaron a entregar se envían al volver (el bot puede
@@ -43,6 +48,7 @@ class Job:
     failed: list = field(default_factory=list)
     sealed: bool = False      # ya no se le van a añadir más capítulos
     finished: bool = False    # ya se ha enviado job_complete
+    watch_url: str = ""       # trabajo observado (webhook): no sustituye a los avisos propios
 
     @property
     def total(self) -> int:
@@ -118,6 +124,12 @@ class JobTracker(metaclass=Singleton):
             return None
         return Job(str(job_id), name, title, kind)
 
+    def new_watch_job(self, watch_url: str, name: str, title: str) -> Job | None:
+        """Trabajo observado de un webhook (None si no hay requester-bot al que avisar)."""
+        if not self.enabled or not watch_url:
+            return None
+        return Job(f"watch:{time.time_ns()}", name, title, watch_url=watch_url)
+
     def attach(self, job: Job, key: tuple):
         """Se registra ANTES de encolar: el worker podría terminarlo enseguida."""
         with self._lock:
@@ -135,7 +147,7 @@ class JobTracker(metaclass=Singleton):
         """
         Informa a requester-bot del progreso de un episodio. Devuelve True si el
         episodio pertenece a un trabajo con seguimiento (en ese caso no hay que
-        notificarlo por el Telegram propio).
+        notificarlo por el Telegram propio). Los observados devuelven False.
         """
         with self._lock:
             job = self._by_key.get(key)
@@ -150,13 +162,14 @@ class JobTracker(metaclass=Singleton):
                        total=job.total, **data)
             self._maybe_finish(job)
             self._save_locked()
-        return True
+        return not job.watch_url
 
     def _emit(self, job: Job, event: str, **data):
         if data.get("error"):
             data["error"] = display_path(data["error"], keep_code=False)
+        extra = {"watch_url": job.watch_url} if job.watch_url else {}
         self.outbox.append({"job_id": job.job_id, "event": event, "name": job.name,
-                            "kind": job.kind, **data, "_queued_at": time.time()})
+                            "kind": job.kind, **extra, **data, "_queued_at": time.time()})
 
     def _maybe_finish(self, job: Job):
         """Con _lock. Emite job_complete cuando ya no queda nada pendiente."""
@@ -241,6 +254,7 @@ class CallbackSender(BackgroundLoop, metaclass=Singleton):
             log.error("Evento para requester-bot descartado tras %s h sin poder entregarse: %s",
                       OUTBOX_MAX_AGE_SECONDS // 3600, payload)
             # fallos y finales no se pueden perder en silencio: van al Telegram propio
-            if payload["event"] in ("episode_failed", "job_complete"):
+            # (los observados ya se avisaron por ahí)
+            if not payload.get("watch_url") and payload["event"] in ("episode_failed", "job_complete"):
                 notify(f"⚠️ requester-bot no responde. Evento perdido de <b>{payload.get('name')}</b>: "
                        f"{payload['event']} {payload.get('episode', '')} {payload.get('error', '')}")

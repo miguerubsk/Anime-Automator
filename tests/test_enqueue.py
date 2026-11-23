@@ -43,6 +43,19 @@ class EnqueueTest(AutomatorTestCase):
             again = self.run_enqueue()
         self.assertEqual((again["queued"], again["already_in_progress"]), ([], [2, 3]))
 
+    def test_webhook_is_observed_for_requester_bot(self):
+        import os
+        from automator.pipeline.jobs import JobTracker
+        from automator.pipeline.pending import PendingStore
+        os.environ["REQUESTER_CALLBACK_URL"] = "http://requester.invalid/events"
+        PendingStore()
+        with self.page("Semanal - Japan-Paw! Descarga Calidad", link(1, "https://a/1.mkv")), \
+                mock.patch("automator.library.emision.EmisionLinker.ensure"):
+            result = self.run_enqueue(watch=True)
+        self.assertEqual((result["queued"], result["tracked"]), ([1], False))
+        job = JobTracker()._by_key[next(iter(JobTracker()._by_key))]
+        self.assertEqual(job.watch_url, "https://paste.japan-paw.net/?v=1")
+
     def test_dry_run_creates_nothing(self):
         with self.page("Nueva - Japan-Paw! Descarga Calidad", link(1, "https://a/1.mkv")):
             result = self.run_enqueue(dry_run=True)

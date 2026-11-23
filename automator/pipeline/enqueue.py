@@ -38,7 +38,7 @@ class EnqueueRequest:
 
     def __init__(self, watch_url: str, watch_title: str = "", link_emision: bool = True, priority: int = 0,
                  job_id=None, kind: str | None = None, title_hint: str | None = None,
-                 notify_fn: Callable[[str], None] | None = None, dry_run: bool = False):
+                 notify_fn: Callable[[str], None] | None = None, dry_run: bool = False, watch: bool = False):
         self.watch_url = watch_url
         self.watch_title = watch_title
         self.link_emision = link_emision
@@ -48,6 +48,7 @@ class EnqueueRequest:
         self.title_hint = title_hint
         self.notify_fn = notify_fn
         self.dry_run = dry_run
+        self.watch = watch   # viene del webhook: se avisa también a requester-bot (trabajo observado)
 
     def report_error(self, msg: str, cfg: dict):
         if self.dry_run:
@@ -152,14 +153,17 @@ class Enqueuer:
 
         items = [WorkItem(target, watch_title, ep, links[ep]) for ep in missing]
         job = JobTracker().new_job(req.job_id, anime_name, watch_title)
+        if job is None and req.watch:
+            job = JobTracker().new_watch_job(req.watch_url, anime_name, watch_title)
+        observed = bool(job and job.watch_url)
         queued, skipped = self._queue(items, job, req.priority)
-        if queued and not job:
+        if queued and (not job or observed):
             BatchProgress().queued(target["folder"], anime_name, queued)
             log.info("Encolados para %s: %s", watch_title, queued)
         if skipped:
             log.info("Ya en cola/procesándose para %s: %s", watch_title, skipped)
         return {"status": "queued", **info, "queued": queued, "already_in_progress": skipped,
-                "tracked": bool(job and queued)}
+                "tracked": bool(job and queued and not observed)}
 
     @staticmethod
     def _queue(items: list[WorkItem], job, priority: int):
@@ -214,7 +218,7 @@ class Enqueuer:
 # Atajos para quien llama
 # ------------------------------------------------------------------ #
 def enqueue_from_webhook(cfg: dict, watch_title: str, watch_url: str) -> dict:
-    return Enqueuer(cfg).run(EnqueueRequest(watch_url, watch_title))
+    return Enqueuer(cfg).run(EnqueueRequest(watch_url, watch_title, watch=True))
 
 
 def download_whole_anime(cfg: dict, url: str, job_id=None, kind=None, title=None, notify_fn=None) -> dict:
