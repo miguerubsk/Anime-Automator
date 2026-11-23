@@ -1,4 +1,4 @@
-"""API HTTP (Flask): webhook de change-detection, /download, /check, /seasons, /watches, /health."""
+"""API HTTP (Flask): webhook de change-detection, /download, /check, /seasons, /watches, /torrent, /health."""
 
 import hmac
 import logging
@@ -14,6 +14,7 @@ from .library.naming import folder_safe, name_key, split_season
 from .notify.paths import display_path
 from .notify.telegram import notify
 from .pipeline.enqueue import check_library, describe_download_result, download_whole_anime, enqueue_from_webhook
+from .pipeline.torrent_requests import TorrentRequest
 from .pipeline.watches import DriveWatcher, WatchRegistry
 
 log = logging.getLogger("anime-automator")
@@ -182,6 +183,46 @@ def create_app() -> Flask:
         if w is None:
             return jsonify({"status": "unknown_watch"}), 404
         return jsonify(DriveWatcher().poll(load_config(), w)), 200
+
+    # ---------------- animes enteros por torrent (los pide Kuro) ----------------
+    def _torrent_request():
+        payload = _payload()
+        try:
+            anilist_id = int(payload.get("anilist_id"))
+        except (TypeError, ValueError):
+            return None, payload
+        return TorrentRequest(load_config(), anilist_id, payload.get("season")), payload
+
+    @app.route("/torrent/check", methods=["POST"])
+    def torrent_check():
+        """
+        Qué capítulos hay por torrent de una entrada de AniList, sin descargar:
+        {"anilist_id", "season"?}. Estados: missing, nothing_new, in_progress,
+        nothing_found, unsupported, not_found, anilist_down...
+        """
+        if not _authorized():
+            return jsonify({"status": "unauthorized"}), 401
+        req, _ = _torrent_request()
+        if req is None:
+            return jsonify({"status": "bad_request", "error": "falta anilist_id"}), 400
+        result = req.plan()
+        log.info("Consulta por torrent de AniList %s: %s", req.anilist_id,
+                 {k: result.get(k) for k in ("status", "name", "season", "found", "missing")})
+        return jsonify(_shown(result, load_config())), 200
+
+    @app.route("/torrent/download", methods=["POST"])
+    def torrent_download():
+        """Lo mismo, y pone a descargar lo que falte: {"anilist_id", "season"?, "job_id"?}."""
+        if not _authorized():
+            return jsonify({"status": "unauthorized"}), 401
+        req, payload = _torrent_request()
+        if req is None:
+            return jsonify({"status": "bad_request", "error": "falta anilist_id"}), 400
+        job_id = payload.get("job_id")
+        result = req.start(job_id=str(job_id) if job_id not in (None, "") else None)
+        log.info("Descarga por torrent de AniList %s (job %s): %s", req.anilist_id, job_id,
+                 {k: result.get(k) for k in ("status", "name", "season", "queued", "not_added")})
+        return jsonify(_shown(result, load_config())), 200
 
     @app.route("/health", methods=["GET"])
     def health():

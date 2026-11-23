@@ -236,42 +236,48 @@ class SeasonResolver:
         o None si el título no es de este tipo o no hay datos fiables.
         """
         try:
-            m = self.find_media(title, premiere, alt_titles)
-            if not m or m.get("format") not in MAIN_FORMATS:
-                return None  # películas, OVAs, especiales: como siempre
-            chain = self._prequel_chain(m)
-            mains_before = sum(1 for p in chain if _is_main(p))
-
-            if mains_before == 0:
-                # primera temporada: solo si tiene secuelas y el título trae subtítulo
-                # ("Darker than Black: Kuro no Keiyakusha")
-                head, tail = split_title(title)
-                if not _is_main(m) or not tail or len(name_key(head)) < 3 or not self._has_main_sequel(m):
-                    return None
-                base, season = head, "1"
-            else:
-                root = next(p for p in reversed(chain) if _is_main(p))
-                bases = set()
-                for n in _names(root):
-                    bases.add(n)
-                    bases.add(split_title(n)[0])
-                split = _split_on_base(title, bases)
-                if not split:
-                    log.info("AniList: %r no empieza por el nombre de su primera temporada (%s)",
-                             title, _names(root)[:2])
-                    return None
-                base, tail = split
-                season = str(mains_before + 1) if _is_main(m) else f"{mains_before}.5"
-
-            info = {"base": base, "season": season, "subtitle": tail, "anilist_id": m["id"]}
-            log.info("Temporada según AniList: %r -> %s", title, info)
-            return info
+            return self.info_for(self.find_media(title, premiere, alt_titles), title)
         except AniListDown as e:
             log.warning("AniList no responde (%s): %r se nombra como siempre", e, title)
             return None
         except Exception:
             log.exception("Fallo calculando la temporada de %r", title)
             return None
+
+    def info_for(self, m, title: str):
+        """
+        Como season_info(), pero con la entrada de AniList ya elegida (la
+        piden por su id las búsquedas por torrent). Lanza AniListDown.
+        """
+        if not m or m.get("format") not in MAIN_FORMATS:
+            return None  # películas, OVAs, especiales: como siempre
+        chain = self._prequel_chain(m)
+        mains_before = sum(1 for p in chain if _is_main(p))
+
+        if mains_before == 0:
+            # primera temporada: solo si tiene secuelas y el título trae subtítulo
+            # ("Darker than Black: Kuro no Keiyakusha")
+            head, tail = split_title(title)
+            if not _is_main(m) or not tail or len(name_key(head)) < 3 or not self._has_main_sequel(m):
+                return None
+            base, season = head, "1"
+        else:
+            root = next(p for p in reversed(chain) if _is_main(p))
+            bases = set()
+            for n in _names(root):
+                bases.add(n)
+                bases.add(split_title(n)[0])
+            split = _split_on_base(title, bases)
+            if not split:
+                log.info("AniList: %r no empieza por el nombre de su primera temporada (%s)",
+                         title, _names(root)[:2])
+                return None
+            base, tail = split
+            season = str(mains_before + 1) if _is_main(m) else f"{mains_before}.5"
+
+        info = {"base": base, "season": season, "subtitle": tail, "anilist_id": m["id"]}
+        log.info("Temporada según AniList: %r -> %s", title, info)
+        return info
 
 
 # ------------------------------------------------------------------ #

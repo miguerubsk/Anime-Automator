@@ -120,7 +120,7 @@ class Library(metaclass=Singleton):
 
     # ---------------- resolución de la carpeta de un anime ----------------
     def resolve(self, cfg: dict, watch_title: str, link_emision: bool = True, create: bool = True,
-                page_text: str = ""):
+                page_text: str = "", layout: SeasonLayout | None = None):
         """
         Devuelve (target_folder: Path, anime_name: str, is_new_folder: bool).
         Prioridad: override manual en config.yaml > carpeta ya existente con un
@@ -134,6 +134,8 @@ class Library(metaclass=Singleton):
 
         Con create=False solo calcula la ruta: no crea carpetas ni enlaces ni
         reorganiza nada (sirve para consultar qué hay ya en la biblioteca).
+        Con `layout`, la serie y la temporada ya vienen decididas (búsquedas
+        por torrent, que parten de una entrada concreta de AniList).
         """
         link = link_emision and create
 
@@ -145,7 +147,7 @@ class Library(metaclass=Singleton):
             return override, base.name, False
 
         anime_root = Path(cfg["anime_root"])
-        layout = season_layout(cfg, watch_title, page_text)
+        layout = layout or season_layout(cfg, watch_title, page_text)
         name, season, subtitle = layout.base, layout.season, layout.subtitle
 
         legacy = self.find_folder(cfg, layout.full) if subtitle else None
