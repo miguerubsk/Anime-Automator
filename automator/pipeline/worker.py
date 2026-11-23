@@ -21,7 +21,7 @@ from ..sources.japanpaw import alternative_link
 from .failures import RELEASED, FailureContext, handle_failure
 from .model import WorkItem
 from .pending import PendingStore
-from .processing import EpisodeProcessor, source_for
+from .processing import DRIVE, EpisodeProcessor, chosen_source, source_for
 from .progress import BatchProgress
 from .registry import Completed, InProgress
 from .reporting import report
@@ -143,8 +143,8 @@ class Worker(BackgroundLoop, metaclass=Singleton):
         item = self._refresh_link(cfg, item)
         try:
             log.info("Procesando %s capítulo %s (intento %s%s)", item.title, item.episode, item.attempt,
-                     ", desde el Drive" if item.target.get("via_drive") else "")
-            processed = EpisodeProcessor().prepare(cfg, item, source_for(item))
+                     ", desde el Drive" if chosen_source(cfg, item) == DRIVE else "")
+            processed = EpisodeProcessor().prepare(cfg, item, source_for(cfg, item))
         except Exception as e:
             Finisher().finish_safely(cfg, item, exc=e)
         else:

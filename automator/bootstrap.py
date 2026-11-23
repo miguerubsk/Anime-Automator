@@ -31,6 +31,7 @@ def start():
     from .pipeline.recovery import cleanup_stale_tmp, restore_pending_work
     from .pipeline.retries import RetryScheduler
     from .pipeline.torrents import TorrentTracker
+    from .pipeline.watches import DriveWatcher
     from .pipeline.worker import Placer, Worker
 
     PendingStore()               # se engancha a la cola para guardarla
@@ -40,5 +41,6 @@ def start():
     TorrentTracker().load()
     restore_pending_work()
 
-    for service in (RetryScheduler(), CallbackSender(), Worker(), Placer(), TorrentTracker(), AdminBot()):
+    for service in (RetryScheduler(), CallbackSender(), Worker(), Placer(), TorrentTracker(), AdminBot(),
+                    DriveWatcher()):
         service.start()

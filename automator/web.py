@@ -1,18 +1,20 @@
-"""API HTTP (Flask): webhook de change-detection, /download, /check, /seasons, /health."""
+"""API HTTP (Flask): webhook de change-detection, /download, /check, /seasons, /watches, /health."""
 
+import hmac
 import logging
 import threading
 import time
 
 from flask import Flask, jsonify, request
 
-from .core.config import load_config
+from .core.config import env, load_config
 from .core.util import is_japanpaw_url
 from .library.folders import season_layout
 from .library.naming import folder_safe, name_key, split_season
 from .notify.paths import display_path
 from .notify.telegram import notify
 from .pipeline.enqueue import check_library, describe_download_result, download_whole_anime, enqueue_from_webhook
+from .pipeline.watches import DriveWatcher, WatchRegistry
 
 log = logging.getLogger("anime-automator")
 
@@ -31,6 +33,12 @@ def _japanpaw_request(payload: dict):
     kind = payload.get("kind") if payload.get("kind") in ("movie", "series") else None
     title = (payload.get("title") or "").strip() or None
     return url, kind, title
+
+
+def _authorized() -> bool:
+    """Si hay REQUESTER_CALLBACK_SECRET, quien cambia cosas tiene que mandarlo (el mismo que usa Kuro)."""
+    secret = env("REQUESTER_CALLBACK_SECRET")
+    return not secret or hmac.compare_digest(request.headers.get("X-Callback-Secret", ""), secret)
 
 
 def _shown(result: dict, cfg: dict) -> dict:
@@ -142,6 +150,38 @@ def create_app() -> Flask:
         if late:
             warmer.warm(cfg, late)
         return jsonify({"seasons": out}), 200
+
+    # ---------------- animes vigilados en el Drive (los manda Kuro) ----------------
+    @app.route("/watches", methods=["PUT"])
+    def watches_replace():
+        """
+        Lista completa de animes en seguimiento (sustituye a la anterior):
+        {"watches": [{"watch_url", "title",
+                      "schedule"?: {"weekday": 0-6 (0=lunes), "start_min", "hours"},
+                      "timezone"?, "drive_folder"?, "season"?}]}
+        """
+        if not _authorized():
+            return jsonify({"status": "unauthorized"}), 401
+        try:
+            watches = WatchRegistry().replace(list(_payload().get("watches") or []))
+        except (ValueError, TypeError, KeyError) as e:
+            return jsonify({"status": "bad_request", "error": str(e)}), 400
+        log.info("Kuro ha actualizado los animes vigilados en el Drive: %s", len(watches))
+        return jsonify({"status": "ok", "count": len(watches)}), 200
+
+    @app.route("/watches", methods=["GET"])
+    def watches_list():
+        return jsonify({"watches": DriveWatcher().overview(load_config())}), 200
+
+    @app.route("/watches/poll", methods=["POST"])
+    def watches_poll():
+        """Mirar ya un anime en el Drive (aunque hoy no se emita): {"watch_url"}."""
+        if not _authorized():
+            return jsonify({"status": "unauthorized"}), 401
+        w = WatchRegistry().get((_payload().get("watch_url") or "").strip())
+        if w is None:
+            return jsonify({"status": "unknown_watch"}), 404
+        return jsonify(DriveWatcher().poll(load_config(), w)), 200
 
     @app.route("/health", methods=["GET"])
     def health():

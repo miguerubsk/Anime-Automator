@@ -4,7 +4,7 @@ Qué hacer cuando un capítulo falla (cadena de manejadores / estrategias).
 Cada manejador mira el fallo y, si le toca, lo resuelve y dice qué pasa con
 el capítulo (Disposition); si no, pasa al siguiente. El orden importa:
 
-  0. DriveMirror         el mismo archivo desde la unidad de Drive (sin cupo ni LaLiga)
+  0. DriveMirror         la otra fuente del mismo archivo (Drive <-> enlace del paste)
   1. TemporaryError      conexión, 5xx, cupo, la NAS: reintento con espera creciente
                          (y de vez en cuando, otro enlace si el servidor no contesta)
   2. LogPermanent        deja constancia del fallo y sigue
@@ -29,6 +29,7 @@ from ..sources.drive import DriveError, DriveMirror
 from ..sources.japanpaw import alternative_link
 from .backoff import compute_retry_delay_seconds
 from .model import WorkItem
+from .processing import DRIVE, PASTE, chosen_source
 from .progress import BatchProgress
 from .reporting import report
 from .retries import RetryScheduler
@@ -95,34 +96,43 @@ class FailureHandler:
 
 class DriveMirrorHandler(FailureHandler):
     """
-    Si el enlace del paste falla (cupo, LaLiga, 404...), se prueba ya el mismo
-    archivo en la unidad de Drive. Si lo que falla es el propio Drive, se
-    reintenta más tarde (otra vez enlace y, si falla, Drive); si el archivo
-    bajó pero no se pudo procesar, sigue la cadena normal.
+    Dos fuentes para el mismo archivo: la unidad de Drive y el enlace del
+    paste (por defecto, primero la de drive_mirror.prefer). Si falla una por
+    culpa de la fuente (cupo, LaLiga, 404...), se prueba ya la otra. Si fallan
+    las dos, sigue la cadena normal (reintento más tarde, otro enlace...), y
+    el siguiente intento vuelve a empezar por la preferida.
     """
 
     def handle(self, ctx):
         item = ctx.item
-        if item.target.get("via_drive"):
-            ctx.item = item = item.evolve(via_drive=False)
-            if not isinstance(ctx.exc, DriveError):
-                return None
-            delay = compute_retry_delay_seconds(item.attempt, ctx.cfg, ctx.exc)
-            log.warning("%s %s: falló el enlace y también el Drive (%s); reintento en %s",
+        current = chosen_source(ctx.cfg, item)
+        tried = set(item.target.get("tried_sources") or []) | {current}
+        # lo que siga en la cadena (reintentos...) empieza de cero
+        ctx.item = item.evolve(source=None, via_drive=False, tried_sources=[])
+        if not ctx.source_failed:
+            return None
+        other = PASTE if current == DRIVE else DRIVE
+        if other not in tried and (other == PASTE or DriveMirror(ctx.cfg).remote_path(item.url)):
+            where = "del Drive" if current == DRIVE else "desde el enlace"
+            log.info("%s %s falló %s (%s): pruebo %s", item.title, item.label, where, ctx.exc,
+                     "el enlace" if other == PASTE else "el Drive")
+            WorkQueue().put(item.evolve(source=other, via_drive=False, tried_sources=sorted(tried)),
+                            priority=0, at="front")
+            return HELD
+        if current == DRIVE and isinstance(ctx.exc, DriveError):
+            # fallaron las dos y la última fue el Drive: reintento más tarde
+            delay = compute_retry_delay_seconds(ctx.item.attempt, ctx.cfg, ctx.exc)
+            log.warning("%s %s: fallaron el enlace y el Drive (%s); reintento en %s",
                         item.title, item.label, ctx.exc, format_duration(delay))
-            RetryScheduler().schedule(item, delay / 3600, item.attempt + 1)
+            RetryScheduler().schedule(ctx.item, delay / 3600, item.attempt + 1)
             report(item.key, "episode_retry",
-                   f"⏳ <b>{item.title}</b> {item.label}: falló el enlace y también el Drive "
+                   f"⏳ <b>{item.title}</b> {item.label}: fallaron el enlace y el Drive "
                    f"({describe_error(ctx.exc)}). Se reintentará en ~{format_duration(delay)}.",
                    notify_if=item.attempt <= 3 or item.attempt % 6 == 0,
                    attempt=item.attempt, error=describe_error(ctx.exc, for_html=False),
                    delay=format_duration(delay))
             return HELD
-        if not ctx.source_failed or not DriveMirror(ctx.cfg).remote_path(item.url):
-            return None
-        log.info("%s %s falló desde el enlace (%s): lo bajo del Drive", item.title, item.label, ctx.exc)
-        WorkQueue().put(item.evolve(via_drive=True), priority=0, at="front")
-        return HELD
+        return None
 
 
 class TemporaryErrorHandler(FailureHandler):

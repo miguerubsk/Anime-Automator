@@ -109,7 +109,31 @@ class Enqueuer:
         if not links:
             return self._fail(req, "no_tab_found",
                               f"❌ No se pudo identificar ninguna pestaña de descarga válida para <b>{watch_title}</b>")
-        return self._series(req, page, watch_title, links)
+        return self._series(req, page.text, watch_title, links)
+
+    def run_links(self, req: EnqueueRequest, links: dict[int, str]) -> dict:
+        """
+        Como run(), pero con los enlaces ya sabidos ({capítulo: url}, p.ej. de la
+        unidad de Drive) en vez de leerlos de la ficha: sin Chrome ni Cloudflare.
+        Sin log de "nada nuevo" (se llama cada pocos minutos).
+        """
+        try:
+            assert_nas_mounted(self.cfg)
+        except Exception as e:
+            return {"status": "nas_not_mounted", "error": str(e)}
+        if not links:
+            return {"status": "nothing_new"}
+        # primero sin crear nada (ni carpetas ni enlaces de emisión): lo normal
+        # en cada vuelta es que no falte nada
+        try:
+            folder, _name, _new = Library().resolve(self.cfg, req.watch_title, link_emision=False, create=False)
+        except Exception as e:
+            return {"status": "folder_resolution_failed", "error": str(e)}
+        have = files.existing_episode_numbers(Path(folder)) | Completed().episodes_of(str(folder))
+        target = {"folder": str(folder)}
+        if all(ep in have or work_key(target, ep) in InProgress() for ep in links):
+            return {"status": "nothing_new"}
+        return self._series(req, "", req.watch_title, links, quiet=True)
 
     @staticmethod
     def _is_movie(req: EnqueueRequest, page: JapanPawPage, links: dict, movie_title: str) -> bool:
@@ -119,11 +143,12 @@ class Enqueuer:
             sorted(links) == [1] and looks_like_movie_title(movie_title))
 
     # ---------------- series ----------------
-    def _series(self, req: EnqueueRequest, page: JapanPawPage, watch_title: str, links: dict) -> dict:
+    def _series(self, req: EnqueueRequest, page_text: str, watch_title: str, links: dict,
+                quiet: bool = False) -> dict:
         try:
             target_folder, anime_name, is_new_folder = Library().resolve(
                 self.cfg, watch_title, link_emision=req.link_emision and not req.dry_run,
-                create=not req.dry_run, page_text=page.text)
+                create=not req.dry_run, page_text=page_text)
         except Exception as e:
             return self._fail(req, "folder_resolution_failed",
                               f"❌ Error resolviendo la carpeta de <b>{watch_title}</b>: {e}", True)
@@ -142,7 +167,8 @@ class Enqueuer:
         }
 
         if not missing:
-            log.info("Nada nuevo que descargar para %s (ya tengo: %s)", watch_title, sorted(have))
+            (log.debug if quiet else log.info)("Nada nuevo que descargar para %s (ya tengo: %s)",
+                                               watch_title, sorted(have))
             return {"status": "nothing_new", **info}
 
         if req.dry_run:

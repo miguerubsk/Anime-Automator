@@ -102,9 +102,26 @@ class DriveSource(HttpSource):
         return raw
 
 
-def source_for(item: WorkItem) -> EpisodeSource:
-    """Por dónde se baja este capítulo: el enlace del paste o, si toca, el Drive."""
-    return DriveSource() if item.target.get("via_drive") else HttpSource()
+DRIVE, PASTE = "drive", "paste"
+
+
+def chosen_source(cfg: dict, item: WorkItem) -> str:
+    """
+    Por dónde se baja este intento: lo que diga el capítulo (tras fallar la
+    otra fuente) o, si no, la preferida (drive_mirror.prefer) si el enlace
+    tiene equivalente en el Drive.
+    """
+    explicit = item.target.get("source")
+    if explicit in (DRIVE, PASTE):
+        return explicit
+    if item.target.get("via_drive"):  # estado guardado por versiones anteriores
+        return DRIVE
+    mirror = DriveMirror(cfg)
+    return DRIVE if mirror.prefer and mirror.remote_path(item.url) else PASTE
+
+
+def source_for(cfg: dict, item: WorkItem) -> EpisodeSource:
+    return DriveSource() if chosen_source(cfg, item) == DRIVE else HttpSource()
 
 
 def torrent_files(torrent) -> list[dict]:

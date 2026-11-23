@@ -103,16 +103,31 @@ download_retry:
 # ------------------------------------------------------------
 # La unidad compartida de Google Drive de Japan-Paw (por rclone, con tu
 # cuenta). Los enlaces del paste son de un índice de esa misma unidad, que
-# tiene cupo de descarga ("403. Cuota Excedida"): si un enlace falla, el
-# mismo archivo se baja del Drive. Aquí, cada host del índice -> el remote
-# de rclone y la carpeta que corresponde a su raíz.
+# tiene su propio cupo ("403. Cuota Excedida") y depende de Cloudflare. Cada
+# capítulo se baja de una fuente y, si falla, de la otra. Ojo: el Drive
+# también tiene cupo, pero por archivo (downloadQuotaExceeded).
+# hosts: cada host del índice -> el remote de rclone y su carpeta raíz.
 # ------------------------------------------------------------
 drive_mirror:
   enabled: true
+  prefer: true                 # primero el Drive; el enlace del paste, de respaldo
   rclone_config: "/config/rclone/rclone.conf"
   hosts:
     anime.craftervault.com: "japanpaw:Anime"
     emision.craftervault.com: "japanpaw-emision:"
+
+# ------------------------------------------------------------
+# Vigilar la unidad de emisión del Drive (más rápido que change-detection y
+# sin Chrome). Qué animes y en qué ventana (la misma que en change-detection)
+# los manda Kuro (requester-bot) con PUT /watches. Los archivos con SxxEyy se
+# encolan directamente; los demás, leyendo la ficha.
+# change-detection sigue funcionando igual en paralelo.
+# ------------------------------------------------------------
+drive_watch:
+  enabled: true
+  host: "emision.craftervault.com"   # qué unidad de drive_mirror.hosts se vigila
+  interval_minutes: 10
+  max_age_days: 21                   # archivos más viejos no se miran
 
 # ------------------------------------------------------------
 # Bloqueo de IPs de LaLiga (en partido, los operadores bloquean IPs de
