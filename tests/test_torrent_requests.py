@@ -79,7 +79,9 @@ class CatalogTest(AutomatorTestCase):
         self.assertEqual(get.call_count, 1)
 
 
-class TorrentRequestTest(AutomatorTestCase):
+class AniListMocked(AutomatorTestCase):
+    """AniList sale de self.db (por id) y nyaa.si de plan(..., releases)."""
+
     def setUp(self):
         super().setUp()
         self.db = {}
@@ -102,6 +104,8 @@ class TorrentRequestTest(AutomatorTestCase):
         self.addCleanup(self.catalog.stop)
         return req
 
+
+class TorrentRequestTest(AniListMocked):
     def test_second_season_goes_to_its_folder(self):
         self.db[1] = media(1, "Kono Oto Tomare!", 13)
         self.db[2] = media(2, "Kono Oto Tomare! 2nd Season", 13, prequel=1)
@@ -168,3 +172,57 @@ class TorrentEndpointTest(AutomatorTestCase):
                         return_value={"status": "nothing_found", "folder": ""}):
             r = client.post("/torrent/check", json={"anilist_id": 1}, headers={"X-Callback-Secret": "s3"})
         self.assertEqual(r.get_json()["status"], "nothing_found")
+
+
+def chained(mid, romaji, fmt="TV", episodes=13, prequel=None, synonyms=()):
+    """Entrada de AniList con su precuela (del formato que sea: la T2 puede colgar de una OVA)."""
+    m = media(mid, romaji, episodes, fmt, synonyms=synonyms)
+    if prequel:
+        pid, pfmt = prequel
+        m["relations"]["edges"] = [{"relationType": "PREQUEL", "node": {"id": pid, "type": "ANIME", "format": pfmt}}]
+    return m
+
+
+class SeasonDetectionTest(AniListMocked):
+    """Temporadas que solo se distinguen por un signo pegado al nombre."""
+
+    def setUp(self):
+        super().setUp()
+        self.db[8675] = chained(8675, "Seitokai Yakuindomo")
+        self.db[10119] = chained(10119, "Seitokai Yakuindomo OVA", "OVA", 8, prequel=(8675, "TV"))
+        self.db[20448] = chained(20448, "Seitokai Yakuindomo＊", prequel=(10119, "OVA"),
+                                 synonyms=["Seitokai Yakuindomo*", "Seitokai Yakuindomo Season 2"])
+
+    def test_split_on_base(self):
+        from automator.library.anilist import _split_on_base
+        self.assertEqual(_split_on_base("Seitokai Yakuindomo＊", ["Seitokai Yakuindomo"]), ("Seitokai Yakuindomo", ""))
+        self.assertEqual(_split_on_base("Okusama ga Seitokaichou!+!", ["Okusama ga Seitokaichou!"]),
+                         ("Okusama ga Seitokaichou!", ""))
+        self.assertEqual(_split_on_base("Zombieland Saga Revenge", ["Zombieland Saga"]), ("Zombieland Saga", "Revenge"))
+        self.assertEqual(_split_on_base("Darker than Black: Ryuusei no Gemini", ["Darker than Black"]),
+                         ("Darker than Black", "Ryuusei no Gemini"))
+        self.assertIsNone(_split_on_base("Workingman", ["Working"]))
+
+    def test_second_season_with_an_asterisk(self):
+        from automator.library.anilist import SeasonResolver
+        info = SeasonResolver().info_for(self.db[20448], "Seitokai Yakuindomo＊")
+        self.assertEqual((info["base"], info["season"], info["subtitle"]), ("Seitokai Yakuindomo", "2", ""))
+
+    def test_exact_title_first(self):
+        from automator.library.anilist import SeasonResolver
+        resolver = SeasonResolver()
+        with mock.patch.object(resolver.client, "search", return_value=[self.db[20448], self.db[8675]]):
+            self.assertEqual(resolver.find_media("Seitokai Yakuindomo")["id"], 8675)
+            self.assertEqual(resolver.find_media("Seitokai Yakuindomo*")["id"], 20448)
+            info = resolver.season_info("Seitokai Yakuindomo*")
+        self.assertEqual((info["base"], info["season"]), ("Seitokai Yakuindomo", "2"))
+
+    def test_torrent_goes_to_season_2_not_the_series_folder(self):
+        base = self.root / "Anime" / "Seitokai Yakuindomo"
+        for season in (1, 2):
+            (base / f"Temporada {season}").mkdir(parents=True)
+        (base / "Temporada 1" / "01.mkv").write_text("x")
+        result = self.plan(20448, [1, 2]).plan()
+        self.assertEqual((result["name"], result["season"], result["subtitle"]), ("Seitokai Yakuindomo", "2", ""))
+        self.assertTrue(result["folder"].endswith("Seitokai Yakuindomo/Temporada 2"), result["folder"])
+        self.assertEqual(result["missing"], [1, 2])

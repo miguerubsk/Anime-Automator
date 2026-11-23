@@ -18,7 +18,7 @@ from ..core.nas import assert_nas_mounted
 from ..library import files
 from ..library.anilist import MAIN_FORMATS, AniListClient, AniListDown, SeasonResolver, _is_main, _names
 from ..library.folders import Library, SeasonLayout
-from ..library.naming import clean_subtitle, folder_safe, split_season
+from ..library.naming import clean_subtitle, folder_safe, name_key, split_season
 from ..sources.nyaa import NyaaSearch
 from .jobs import JobTracker
 from .model import WorkItem, work_key
@@ -79,9 +79,11 @@ class TorrentRequest:
         if not mains:
             return None
         root_title = (mains[-1].get("title") or {}).get("romaji") or _names(mains[-1])[0]
+        base = split_season(root_title, "")[0]
         season = str(len(mains) + 1) if _is_main(m) else f"{len(mains)}.5"
-        return SeasonLayout(folder_safe(split_season(root_title, "")[0]), season, folder_safe(plain),
-                            folder_safe(title))
+        # si el título es el de la primera con algún signo de más, no hay subtítulo
+        sub = "" if name_key(plain) == name_key(base) else folder_safe(plain)
+        return SeasonLayout(folder_safe(base), season, sub, folder_safe(title))
 
     @staticmethod
     def _release_seasons(names, layout: SeasonLayout) -> set[int]:

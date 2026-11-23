@@ -21,6 +21,7 @@ import logging
 import re
 import threading
 import time
+import unicodedata
 
 import requests
 
@@ -157,15 +158,32 @@ def _split_on_base(title: str, bases) -> tuple[str, str] | None:
     Parte el título por el nombre de la primera temporada: con bases
     {"Zombieland Saga"}, "Zombieland Saga Revenge" -> ("Zombieland Saga",
     "Revenge"). Se queda con el principio más largo que coincida.
+
+    Algunas temporadas solo añaden un adorno pegado al nombre
+    ("Seitokai Yakuindomo*", "Okusama ga Seitokaichou!+!", "K-On!!"): eso
+    no es un subtítulo, así que da (nombre de la primera temporada, "").
     """
-    keys = {name_key(b) for b in bases if len(name_key(b)) >= 3}
-    words = title.split()
-    for i in range(len(words) - 1, 0, -1):
-        head = " ".join(words[:i]).rstrip(":- ")
-        if name_key(head) in keys:
-            tail = " ".join(words[i:]).lstrip(":- ").strip()
-            return head, tail
+    keys: dict[str, str] = {}
+    for b in bases:
+        if len(name_key(b)) >= 3:
+            keys.setdefault(name_key(b), b)
+    for i in range(len(title), 0, -1):
+        # solo se corta entre palabras ("Working" no es el principio de "Workingman")
+        if i < len(title) and title[i - 1].isalnum() and title[i].isalnum():
+            continue
+        key = name_key(title[:i])
+        if key not in keys:
+            continue
+        tail = title[i:].strip(" :-")
+        if not re.search(r"\w", tail):
+            return keys[key], ""
+        return title[:i].rstrip(":- "), tail
     return None
+
+
+def _strict(text: str) -> str:
+    """Para comparar nombres «tal cual» (sin mayúsculas ni anchos raros, pero con los signos)."""
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", text or "").casefold()).strip()
 
 
 class SeasonResolver:
@@ -180,11 +198,14 @@ class SeasonResolver:
         los alternativos de japanpaw) o, si no, la fecha de estreno exacta.
         """
         cands = self.client.search(title)
-        wanted = {name_key(t) for t in (title, *alt_titles) if t}
-        for m in cands:
-            if wanted & {name_key(n) for n in _names(m)}:
-                if not premiere or not _date(m) or _date(m) == premiere or len(cands) == 1:
-                    return m
+        # primero tal cual y luego sin signos: "Seitokai Yakuindomo" y
+        # "Seitokai Yakuindomo*" (la segunda) son lo mismo sin el asterisco
+        for key in (_strict, name_key):
+            wanted = {key(t) for t in (title, *alt_titles) if t}
+            for m in cands:
+                if wanted & {key(n) for n in _names(m)}:
+                    if not premiere or not _date(m) or _date(m) == premiere or len(cands) == 1:
+                        return m
         if premiere:
             for m in cands:
                 if _date(m) == premiere:
@@ -263,10 +284,9 @@ class SeasonResolver:
             base, season = head, "1"
         else:
             root = next(p for p in reversed(chain) if _is_main(p))
-            bases = set()
+            bases = []   # en orden: el romaji de la primera temporada, primero
             for n in _names(root):
-                bases.add(n)
-                bases.add(split_title(n)[0])
+                bases += [n, split_title(n)[0]]
             split = _split_on_base(title, bases)
             if not split:
                 log.info("AniList: %r no empieza por el nombre de su primera temporada (%s)",

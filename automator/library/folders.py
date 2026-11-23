@@ -150,7 +150,8 @@ class Library(metaclass=Singleton):
         layout = layout or season_layout(cfg, watch_title, page_text)
         name, season, subtitle = layout.base, layout.season, layout.subtitle
 
-        legacy = self.find_folder(cfg, layout.full) if subtitle else None
+        # (no vale la carpeta de la propia serie: "Seitokai Yakuindomo*" se llamaría igual)
+        legacy = self.find_folder(cfg, layout.full) if subtitle and name_key(layout.full) != name_key(name) else None
         if legacy is not None:
             # temporada guardada a la antigua, en su propia carpeta
             log.info("Uso la carpeta existente %r para %r (temporada %s)", legacy.name, layout.full, season)
