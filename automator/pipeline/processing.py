@@ -25,6 +25,7 @@ from ..core.util import format_duration, safe_name
 from ..library.folders import Library
 from ..library.quality import lower_copies_for, remove_lower_quality_copies
 from ..media.mkv import Remuxer, mkv_track_info
+from ..sources.drive import DriveError, DriveMirror
 from ..media.tracks import JapanPawTrackPolicy, StrictTrackPolicy
 from .model import WorkItem
 
@@ -85,6 +86,25 @@ class HttpSource(EpisodeSource):
             log.info("Descarga completada %s cap. %s: %.2f GB en %s",
                      name, ep, done / 1e9, format_duration(time.time() - t0))
         return raw
+
+
+class DriveSource(HttpSource):
+    """El mismo archivo del enlace, bajado de la unidad de Drive de Japan-Paw (sin cupo)."""
+
+    def fetch(self, cfg: dict, item: WorkItem) -> Path:
+        mirror = DriveMirror(cfg)
+        remote = mirror.remote_path(item.url)
+        if not remote:
+            raise DriveError(f"el enlace no corresponde a ninguna unidad de Drive: {item.url}")
+        raw = tmp_dir(cfg) / f"raw_{safe_name(item.target['name'])}_{item.episode}.mkv"
+        raw.parent.mkdir(parents=True, exist_ok=True)
+        mirror.download(remote, raw, f"{item.target['name']} cap. {item.episode}")
+        return raw
+
+
+def source_for(item: WorkItem) -> EpisodeSource:
+    """Por dónde se baja este capítulo: el enlace del paste o, si toca, el Drive."""
+    return DriveSource() if item.target.get("via_drive") else HttpSource()
 
 
 def torrent_files(torrent) -> list[dict]:

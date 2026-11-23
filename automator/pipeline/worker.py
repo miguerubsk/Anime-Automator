@@ -21,7 +21,7 @@ from ..sources.japanpaw import alternative_link
 from .failures import RELEASED, FailureContext, handle_failure
 from .model import WorkItem
 from .pending import PendingStore
-from .processing import EpisodeProcessor, HttpSource
+from .processing import EpisodeProcessor, source_for
 from .progress import BatchProgress
 from .registry import Completed, InProgress
 from .reporting import report
@@ -102,7 +102,6 @@ class Worker(BackgroundLoop, metaclass=Singleton):
     def __init__(self):
         super().__init__()
         self._last_nas_alert = 0.0
-        self.source = HttpSource()
 
     def step(self):
         item = WorkQueue().get()
@@ -143,8 +142,9 @@ class Worker(BackgroundLoop, metaclass=Singleton):
             return
         item = self._refresh_link(cfg, item)
         try:
-            log.info("Procesando %s capítulo %s (intento %s)", item.title, item.episode, item.attempt)
-            processed = EpisodeProcessor().prepare(cfg, item, self.source)
+            log.info("Procesando %s capítulo %s (intento %s%s)", item.title, item.episode, item.attempt,
+                     ", desde el Drive" if item.target.get("via_drive") else "")
+            processed = EpisodeProcessor().prepare(cfg, item, source_for(item))
         except Exception as e:
             Finisher().finish_safely(cfg, item, exc=e)
         else:

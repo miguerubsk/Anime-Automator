@@ -101,6 +101,20 @@ download_retry:
   jitter: 0.25                 # ±25 % al azar, para que no reintenten a la vez
 
 # ------------------------------------------------------------
+# La unidad compartida de Google Drive de Japan-Paw (por rclone, con tu
+# cuenta). Los enlaces del paste son de un índice de esa misma unidad, que
+# tiene cupo de descarga ("403. Cuota Excedida"): si un enlace falla, el
+# mismo archivo se baja del Drive. Aquí, cada host del índice -> el remote
+# de rclone y la carpeta que corresponde a su raíz.
+# ------------------------------------------------------------
+drive_mirror:
+  enabled: true
+  rclone_config: "/config/rclone/rclone.conf"
+  hosts:
+    anime.craftervault.com: "japanpaw:Anime"
+    emision.craftervault.com: "japanpaw-emision:"
+
+# ------------------------------------------------------------
 # Bloqueo de IPs de LaLiga (en partido, los operadores bloquean IPs de
 # Cloudflare y la descarga ve un certificado falso). Primero se busca otra IP
 # del mismo servidor por DNS cifrado; si no hay ninguna libre, se descarga

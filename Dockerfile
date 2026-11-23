@@ -4,6 +4,9 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends mkvtoolnix ca-certificates tzdata openssh-client && \
     rm -rf /var/lib/apt/lists/*
 
+# rclone: descargas de la unidad de Drive de Japan-Paw (binario estático)
+COPY --from=rclone/rclone:1.76.0 /usr/local/bin/rclone /usr/local/bin/rclone
+
 WORKDIR /app
 
 COPY requirements.txt .

@@ -47,3 +47,59 @@ class TrackPolicyTest(unittest.TestCase):
         self.assertEqual(cmd, ["mkvmerge", "-o", "out.mkv", "--audio-tracks", "1", "--subtitle-tracks", "2",
                                "--track-name", "0:", "--track-name", "1:", "--track-name", "2:", "--title", "",
                                "--default-track-flag", "1:1", "--default-track-flag", "2:1", "in.mkv"])
+
+
+def text_sub(tid, lang=""):
+    t = track(tid, "subtitles", lang)
+    t["properties"]["codec_id"] = "S_TEXT/ASS"
+    return t
+
+
+ES = "¿Qué? Todos la miran. Ven conmigo, no es lo que parece. ¡Eso es una mala idea! " * 5
+EN = "What? Everyone is looking at her. Come with me, it's not what you think. " * 5
+
+
+class JapanPawNeverRejectsTest(unittest.TestCase):
+    """Lo de japan-paw siempre trae español: nunca se descarta por las pistas."""
+
+    def select(self, tracks, texts):
+        from unittest import mock
+        info = {"file_name": "/tmp/x.mkv", "tracks": tracks}
+        with mock.patch("automator.media.tracks.subtitle_text", lambda path, t: texts.get(t["id"], "")):
+            sel = JapanPawTrackPolicy().select(info, CFG)
+        Remuxer().validate(sel)  # no lanza
+        return sel
+
+    def test_two_untagged_spanish_subs_berserk(self):
+        sel = self.select([track(0, "video"), track(1, "audio", "und"), text_sub(2), text_sub(3)], {2: ES, 3: ES})
+        self.assertEqual((sel.jpn_audio_id, sel.keep_sub_ids), (1, [2]))
+
+    def test_picks_spanish_over_untagged_english(self):
+        sel = self.select([track(1, "audio", "jpn"), text_sub(2), text_sub(3)], {2: EN, 3: ES})
+        self.assertEqual(sel.keep_sub_ids, [3])
+
+    def test_mislabeled_spanish_sub(self):
+        sel = self.select([track(1, "audio", "jpn"), text_sub(2, "eng"), text_sub(3, "eng")], {2: EN, 3: ES})
+        self.assertEqual(sel.keep_sub_ids, [3])
+
+    def test_unreadable_subs_do_not_reject(self):
+        sel = self.select([track(1, "audio", "jpn"), text_sub(2, "eng")], {2: EN})
+        self.assertEqual(sel.keep_sub_ids, [])
+        self.assertTrue(sel.sub_requirement_waived)
+
+    def test_any_audio_is_kept(self):
+        sel = self.select([track(1, "audio", "eng"), track(2, "audio", "fre"), text_sub(3, "spa")], {})
+        self.assertEqual((sel.keep_audio_ids, sel.keep_sub_ids), ([1], [3]))
+
+    def test_nyaa_is_still_strict(self):
+        info = {"tracks": [track(1, "audio", "jpn"), text_sub(2), text_sub(3)]}
+        with self.assertRaises(RuntimeError):
+            Remuxer().validate(StrictTrackPolicy().select(info, CFG))
+
+
+class LanguageGuessTest(unittest.TestCase):
+    def test_looks_spanish(self):
+        from automator.media.tracks import looks_spanish
+        self.assertTrue(looks_spanish(ES))
+        self.assertFalse(looks_spanish(EN))
+        self.assertFalse(looks_spanish("¿?"))

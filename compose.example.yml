@@ -4,6 +4,7 @@
 #   cp .env.example .env               # y rellénalo
 #   cp config.example.yaml config.yaml # y ajústalo a tu NAS
 #   # si usas los enlaces de emisión por SSH: la clave en ./ssh/id_ed25519
+#   # si usas el Drive de Japan-Paw: ./rclone/rclone.conf (ver drive_mirror en config.yaml)
 #   docker compose up -d --build
 #
 # Las rutas de config.yaml (anime_root, emision_root, tmp_dir...) son las de
@@ -34,6 +35,7 @@ services:
     volumes:
       - ./config.yaml:/config/config.yaml:ro
       - ./ssh:/config/ssh:ro    # clave para crear los enlaces de emisión en la NAS por SSH
+      - ./rclone:/config/rclone # rclone.conf con la cuenta de Google para el Drive (no :ro: renueva el token)
       # la biblioteca (montaje de la NAS en el host) -> rutas de config.yaml
       - /ruta/del/montaje/de/la/nas:/nuevo-pool
       # estado persistente (cola, reintentos, torrents, peticiones) y temporales

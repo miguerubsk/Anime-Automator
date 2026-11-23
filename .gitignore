@@ -3,6 +3,7 @@
 compose.yml
 config.yaml
 ssh/
+rclone/
 
 # copias de seguridad e imágenes
 bak.*
