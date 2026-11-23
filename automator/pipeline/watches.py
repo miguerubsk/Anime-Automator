@@ -21,6 +21,7 @@ import logging
 import re
 import threading
 import time
+import urllib.parse
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -30,8 +31,8 @@ from ..core.persistence import JsonStore
 from ..core.singleton import Singleton
 from ..core.background import BackgroundLoop
 from ..library.naming import name_key, strip_site_suffix
-from ..sources.drive import DriveError, DriveMirror
-from ..sources.japanpaw import VIDEO_EXT_RE, TabRanking, parse_tab_label
+from ..sources.drive import INDEX_PREFIX, DriveError, DriveMirror
+from ..sources.japanpaw import VIDEO_EXT_RE, JapanPawPage, TabRanking, parse_tab_label
 
 log = logging.getLogger("anime-automator")
 
@@ -53,6 +54,8 @@ class Watch:
     schedule: dict = field(default_factory=dict)
     timezone: str = ""                                 # la de la ventana (si no, la del contenedor)
     drive_folder: str = ""                             # si no, se deduce del título
+    found_folder: str = ""                             # deducida de los enlaces del paste (se recuerda)
+    folder_checked_at: float = 0.0                     # cuándo se leyó el paste buscándola
     season: int | None = None                          # si no, la más alta que haya en la carpeta
     # estado
     last_poll: float = 0.0
@@ -113,6 +116,7 @@ class WatchRegistry(metaclass=Singleton):
             old = self._watches.get(url)
             if old:
                 w.last_poll, w.last_status, w.page_kicked_at = old.last_poll, old.last_status, old.page_kicked_at
+                w.found_folder, w.folder_checked_at = old.found_folder, old.folder_checked_at
             new[url] = w
         with self._lock:
             self._watches = new
@@ -138,6 +142,7 @@ class WatchRegistry(metaclass=Singleton):
 class DriveWatcher(BackgroundLoop, metaclass=Singleton):
     thread_name = "drive-watch"
     dirs_ttl_seconds = 3600
+    folder_retry_seconds = 6 * 3600   # sin carpeta: cada cuánto se vuelve a leer el paste
 
     def __init__(self):
         super().__init__()
@@ -169,13 +174,50 @@ class DriveWatcher(BackgroundLoop, metaclass=Singleton):
         time.sleep(s["interval"] if s["enabled"] else 300)
 
     # ---------------- un anime ----------------
-    def find_folder(self, mirror: DriveMirror, base: str, w: Watch) -> str | None:
+    def find_folder(self, mirror: DriveMirror, base: str, w: Watch, host: str = "") -> str | None:
+        """
+        La carpeta del anime en el Drive: la que diga Kuro; si no, la que se
+        llame como el título; si no, la que usan los enlaces del paste (hay
+        carpetas con otro nombre, p. ej. «Chii Fuyo» para un título larguísimo).
+        Esa se recuerda, y si no aparece no se vuelve a leer el paste hasta
+        pasadas unas horas.
+        """
         if w.drive_folder:
             return w.drive_folder
         if not self._dirs or time.time() - self._dirs_at > self.dirs_ttl_seconds:
             self._dirs, self._dirs_at = mirror.list_dirs(base), time.time()
         wanted = name_key(strip_site_suffix(w.title, load_config().get("site_title_suffix", "")))
-        return next((d for d in self._dirs if name_key(d) == wanted), None)
+        by_name = next((d for d in self._dirs if name_key(d) == wanted), None)
+        if by_name:
+            return by_name
+        if w.found_folder and w.found_folder in self._dirs:
+            return w.found_folder
+        if not host or time.time() - w.folder_checked_at < self.folder_retry_seconds:
+            return None
+        w.folder_checked_at = time.time()
+        try:
+            page = JapanPawPage.fetch(w.watch_url)
+        except Exception as e:
+            log.warning("No pude leer el paste de %s para buscar su carpeta: %s", w.title, e)
+            return None
+        links = [u for t in page.tabs() for u in t["links"].values()]
+        w.found_folder = self.folder_from_links(host, links, self._dirs) or ""
+        if w.found_folder:
+            log.info("Carpeta de %s en el Drive (por los enlaces del paste): %s", w.title, w.found_folder)
+        return w.found_folder or None
+
+    @staticmethod
+    def folder_from_links(host: str, links: list[str], dirs: list[str]) -> str | None:
+        """La primera carpeta (de la raíz de la unidad) a la que apuntan los enlaces de ese host."""
+        for url in links:
+            p = urllib.parse.urlparse(url or "")
+            path = urllib.parse.unquote(p.path)
+            if (p.hostname or "").lower() != host.lower() or not path.startswith(INDEX_PREFIX):
+                continue
+            top = path[len(INDEX_PREFIX):].strip("/").split("/")[0]
+            if top and (top in dirs or not dirs):
+                return top
+        return None
 
     def poll(self, cfg: dict, w: Watch) -> dict:
         with self._poll_lock:
@@ -192,7 +234,7 @@ class DriveWatcher(BackgroundLoop, metaclass=Singleton):
         if not base:
             return {"status": "no_drive", "error": f"drive_watch.host {s['host']!r} no está en drive_mirror.hosts"}
         try:
-            folder = self.find_folder(mirror, base, w)
+            folder = self.find_folder(mirror, base, w, s["host"])
             if not folder:
                 if w.last_status != "no_folder":
                     log.warning("No encuentro la carpeta de %s en el Drive de emisión", w.title)

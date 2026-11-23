@@ -110,6 +110,44 @@ class PollTest(AutomatorTestCase):
         _, _, _, wh2 = self.poll(files)  # al rato: no vuelve a leer la ficha todavía
         wh2.assert_not_called()
 
+    def test_folder_from_paste_links_when_the_name_differs(self):
+        from automator.pipeline import watches
+        from automator.pipeline.watches import WatchRegistry
+        w = WatchRegistry().replace([{"watch_url": "https://paste.japan-paw.net/?v=8128",
+                                      "title": "Tsuihou Sareta Cheat Fuyo Majutsushi wa Kimama na Second Life "
+                                               "- Japan-Paw! Descarga Calidad"}])[0]
+        self.w = w
+        page = mock.Mock()
+        page.tabs.return_value = [{"links": {
+            1: "https://otro.host/0:down/Nada/x.mkv",
+            2: f"https://{HOST}/0:down/Chii%20Fuyo/%5BErai-raws%5D%5BWeb%201080p%5D/Chii%20Fuyo%20-%2002.mkv"}}]
+        with mock.patch.object(watches.JapanPawPage, "fetch", return_value=page) as fetch, \
+             mock.patch.object(watches.DriveMirror, "list_dirs", return_value=["Chii Fuyo", "Otra Serie"]):
+            from automator.pipeline.watches import DriveWatcher
+            mirror = watches.DriveMirror({**self.cfg, **CFG})
+            dw = DriveWatcher()
+            dw._dirs = []
+            self.assertEqual(dw.find_folder(mirror, "japanpaw-emision:", w, HOST), "Chii Fuyo")
+            self.assertEqual(dw.find_folder(mirror, "japanpaw-emision:", w, HOST), "Chii Fuyo")
+            fetch.assert_called_once()                     # se recuerda: no vuelve a leer el paste
+        # Kuro manda la lista otra vez: no se pierde
+        w2 = WatchRegistry().replace([{"watch_url": w.watch_url, "title": w.title}])[0]
+        self.assertEqual(w2.found_folder, "Chii Fuyo")
+
+    def test_no_folder_does_not_reread_the_paste_every_poll(self):
+        from automator.pipeline import watches
+        from automator.pipeline.watches import DriveWatcher
+        page = mock.Mock()
+        page.tabs.return_value = []
+        with mock.patch.object(watches.JapanPawPage, "fetch", return_value=page) as fetch, \
+             mock.patch.object(watches.DriveMirror, "list_dirs", return_value=["Otra Serie"]):
+            mirror = watches.DriveMirror({**self.cfg, **CFG})
+            dw = DriveWatcher()
+            dw._dirs = []
+            self.assertIsNone(dw.find_folder(mirror, "japanpaw-emision:", self.w, HOST))
+            self.assertIsNone(dw.find_folder(mirror, "japanpaw-emision:", self.w, HOST))
+            fetch.assert_called_once()
+
     def test_state_is_saved(self):
         from automator.core.singleton import Singleton
         from automator.pipeline.watches import WatchRegistry
