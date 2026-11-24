@@ -7,6 +7,9 @@ capítulo (grupo preferido > subtítulos múltiples > WEB-DL > 1080p; nunca
 releases sin subtítulos en español) y los añade a Transmission. El
 TorrentTracker se encarga del resto, igual que con el fallback.
 
+Las películas van igual, con un solo «capítulo» (el 1) y a donde van las de
+la web (la carpeta de su serie o la de películas).
+
 - plan(): qué hay, sin crear ni descargar nada.
 - start(): lo mismo y, si falta algo, lo pone a descargar.
 """
@@ -18,6 +21,7 @@ from ..core.nas import assert_nas_mounted
 from ..library import files
 from ..library.anilist import MAIN_FORMATS, AniListClient, AniListDown, SeasonResolver, _is_main, _names
 from ..library.folders import Library, SeasonLayout
+from ..library.movies import MovieLibrary, already_have_movie
 from ..library.naming import clean_subtitle, folder_safe, name_key, split_season
 from ..sources.nyaa import NyaaSearch
 from .jobs import JobTracker
@@ -27,7 +31,7 @@ from .torrents import TorrentTracker, TrackedTorrent, Transmission
 
 log = logging.getLogger("anime-automator")
 
-# lo que se puede pedir así (las películas no van por número de capítulo)
+# lo que se pide por número de capítulo; las películas (MOVIE) van aparte
 SERIES_FORMATS = MAIN_FORMATS | {"OVA", "ONA", "SPECIAL"}
 
 
@@ -103,6 +107,9 @@ class TorrentRequest:
             m = AniListClient().media(self.anilist_id)
             if not m:
                 return {"status": "not_found"}
+            if m.get("format") == "MOVIE":
+                self.media = m
+                return self._plan_movie(m)
             if m.get("format") not in SERIES_FORMATS:
                 return {"status": "unsupported", "format": m.get("format")}
             layout = self._layout(m)
@@ -147,20 +154,52 @@ class TorrentRequest:
             return {"status": "in_progress", **info}
         return {"status": "missing", **info}
 
+    def _plan_movie(self, m) -> dict:
+        names = _names(m)
+        title = names[0]
+        folder, filename, from_series = MovieLibrary(self.cfg).destination(title)
+        dest = folder / filename
+        target = {"folder": str(folder), "name": Path(filename).stem if from_series else title,
+                  "movie": True, "filename": filename, "key": f"movie:{dest}"}
+        have = already_have_movie(folder, filename)
+        rel = None if have else NyaaSearch(self.cfg).movie(names)
+        busy = bool(rel) and work_key(target, 1) in InProgress()
+        info = {
+            "title": title, "name": title, "folder": str(folder), "file": filename, "kind": "movie",
+            "series_folder": from_series, "season": "", "subtitle": "", "new_folder": False, "episodes": 1,
+            "found": [1] if rel else [], "available": 1 if rel else 0, "have": int(have),
+            "have_episodes": [1] if have else [], "missing": [1] if rel and not busy else [],
+            "already_in_progress": [1] if busy else [],
+            "preferred": int(bool(rel and rel.preferred)), "groups": {rel.group or "?": 1} if rel else {},
+        }
+        self._releases, self._target, self._layout_used = ({1: rel} if rel else {}), target, None
+        if have:
+            return {"status": "nothing_new", **info}
+        if not rel:
+            return {"status": "nothing_found", **info}
+        if busy:
+            return {"status": "in_progress", **info}
+        return {"status": "missing", **info}
+
     # ---------------- descarga ----------------
     def start(self, job_id=None) -> dict:
         result = self.plan()
         if result["status"] != "missing":
             return result
         title = result["title"]
+        movie = result.get("kind") == "movie"
         try:
-            folder, name, _ = Library().resolve(self.cfg, title, link_emision=False, create=True,
-                                                layout=self._layout_used)
+            if movie:
+                Path(self._target["folder"]).mkdir(parents=True, exist_ok=True)
+                folder, name = Path(self._target["folder"]), result["name"]
+            else:
+                folder, name, _ = Library().resolve(self.cfg, title, link_emision=False, create=True,
+                                                    layout=self._layout_used)
         except Exception as e:
             log.exception("No se pudo crear la carpeta de %r", title)
             return {**result, "status": "folder_resolution_failed", "error": str(e)}
-        target = {"folder": str(folder), "name": name}
-        job = JobTracker().new_job(job_id, name, title)
+        target = self._target if movie else {"folder": str(folder), "name": name}
+        job = JobTracker().new_job(job_id, name, title, kind="movie" if movie else "series")
         queued, failed = [], []
         for ep in result["missing"]:
             rel = self._releases[ep]

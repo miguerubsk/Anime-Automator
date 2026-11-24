@@ -129,7 +129,7 @@ class TorrentRequestTest(AniListMocked):
     def test_states(self):
         self.db[7] = media(7, "Nada", 12)
         self.assertEqual(self.plan(7, []).plan()["status"], "nothing_found")
-        self.db[8] = media(8, "Peli", 1, fmt="MOVIE")
+        self.db[8] = media(8, "Videoclip", 1, fmt="MUSIC")
         self.assertEqual(self.plan(8, [1]).plan()["status"], "unsupported")
         self.assertEqual(self.plan(99, [1]).plan()["status"], "not_found")
         folder = self.root / "Anime" / "Completo"
@@ -226,3 +226,48 @@ class SeasonDetectionTest(AniListMocked):
         self.assertEqual((result["name"], result["season"], result["subtitle"]), ("Seitokai Yakuindomo", "2", ""))
         self.assertTrue(result["folder"].endswith("Seitokai Yakuindomo/Temporada 2"), result["folder"])
         self.assertEqual(result["missing"], [1, 2])
+
+
+class MovieTest(AniListMocked):
+    def test_movie_names(self):
+        from automator.sources.nyaa import movie_key, movie_release_names
+        self.assertEqual(movie_key("Seitokai Yakuindomo Movie 2"), movie_key("Gekijouban Seitokai Yakuindomo 2"))
+        self.assertNotEqual(movie_key("Seitokai Yakuindomo Movie 2"), movie_key("Seitokai Yakuindomo Movie"))
+        self.assertIn(movie_key("Chainsaw Man Movie: Reze-hen"),
+                      movie_release_names("[Erai-raws] Chainsaw Man: Reze-hen - Movie [1080p CR WEBRip HEVC AAC][MultiSub][EB]"))
+        self.assertIn(movie_key("Chainsaw Man Movie: Reze-hen"), movie_release_names(
+            "[ToonsHub] Chainsaw Man The Movie Reze Arc (2025) 1080p AMZN WEB-DL DDP5.1 H.264 "
+            "(Chainsaw Man Movie: Reze-hen, Multi-Subs)"))
+
+    def test_best_movie_release(self):
+        from automator.sources.nyaa import NyaaSearch
+        items = rss(
+            "[Erai-raws] Gekijouban Seitokai Yakuindomo 2 - Movie [1080p] [ENG]",               # solo inglés
+            "[FacTory] Seitokai Yakuindomo - Complete Collection [Seasons 1-2 + OVAs + Movies]",  # lote
+            "[Erai-raws] Seitokai Yakuindomo - 01 [1080p][MultiSub]",                            # la serie
+            "Seitokai Yakuindomo S02 MULTi 1080p WEB (Multi-Subs, Seitokai Yakuindomo Movie 2)",  # temporada
+            "[Erai-raws] Gekijouban Seitokai Yakuindomo - Movie [1080p][MultiSub]",              # la primera
+            "[ToonsHub] Seitokai Yakuindomo Movie 2 1080p WEB-DL (Multi-Subs)",
+            "[Erai-raws] Gekijouban Seitokai Yakuindomo 2 - Movie [1080p CR WEB-DL AVC AAC][MultiSub][AA]",
+        )
+        s = NyaaSearch(self.cfg)
+        with mock.patch.object(NyaaSearch, "_items", return_value=items):
+            best = s.movie(["Seitokai Yakuindomo Movie 2"])
+        self.assertIn("[AA]", best.title)
+        with mock.patch.object(NyaaSearch, "_items", return_value=items[:3]):
+            self.assertIsNone(s.movie(["Seitokai Yakuindomo Movie 2"]))
+
+    def test_movie_goes_to_its_series_folder(self):
+        from automator.sources.nyaa import Release
+        (self.root / "Anime" / "Seitokai Yakuindomo").mkdir()
+        self.db[1] = media(1, "Seitokai Yakuindomo Movie 2", 1, fmt="MOVIE")
+        from automator.pipeline.torrent_requests import TorrentRequest
+        rel = Release(1, "[Erai-raws] Gekijouban Seitokai Yakuindomo 2 - Movie", "https://t.invalid/m", "Erai-raws",
+                      (False, False, False, False))
+        with mock.patch("automator.sources.nyaa.NyaaSearch.movie", return_value=rel):
+            result = TorrentRequest(self.cfg, 1).plan()
+        self.assertEqual((result["status"], result["kind"], result["missing"]), ("missing", "movie", [1]))
+        self.assertTrue(result["folder"].endswith("Anime/Seitokai Yakuindomo"), result["folder"])
+        self.assertEqual(result["file"], "Película 02.mkv")
+        (self.root / "Anime" / "Seitokai Yakuindomo" / "Película 02.mkv").write_text("x")
+        self.assertEqual(TorrentRequest(self.cfg, 1).plan()["status"], "nothing_new")

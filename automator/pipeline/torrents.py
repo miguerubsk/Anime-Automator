@@ -193,11 +193,11 @@ class TorrentTracker(BackgroundLoop, metaclass=Singleton):
             log.exception("Fallo procesando el resultado del torrent %s", torrent_hash)
             self._give_up(client, torrent_hash, tracked, "falló el procesado", f"(nyaa.si) {e}",
                           lambda err=e: f"❌ (nyaa.si) Error procesando <b>{item.title}</b> "
-                                        f"Capítulo {item.episode:02d}: {err}{BatchProgress().block()}")
+                                        f"{item.label}: {err}{BatchProgress().block()}")
             return False
         BatchProgress().done(item.folder, item.episode)
         report(item.key, "episode_done",
-               lambda: f"✅ (nyaa.si) <b>{item.title}</b> - Capítulo {item.episode:02d} "
+               lambda: f"✅ (nyaa.si) <b>{item.title}</b> - {item.label} "
                        f"procesado y guardado en:\n{dest}{BatchProgress().block()}",
                source="nyaa")
         self.mark_processed(tracked)

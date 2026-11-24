@@ -9,6 +9,7 @@ from pathlib import Path
 
 import requests
 
+from ..library.movies import MOVIE_MARKER_RE
 from ..library.naming import match_season, name_key, split_season, strip_group_prefix
 
 log = logging.getLogger("anime-automator")
@@ -28,7 +29,11 @@ DUB_EXCLUDE_KEYWORDS = ("english dub", "eng dub", "dubbed", "[dub]")
 # grupo preferido, Erai-raws, que los trae aunque no siempre lo ponga).
 MULTISUB_RE = re.compile(r"multi[\s-]?subs?|multiple[\s-]subtitles?|\b(?:spa|spanish|español|esp)\b",
                          re.IGNORECASE)
-ENGLISH_ONLY_RE = re.compile(r"\beng(?:lish)?[\s-]?subs?\b", re.IGNORECASE)
+ENGLISH_ONLY_RE = re.compile(r"\beng(?:lish)?[\s-]?subs?\b|\[eng\]", re.IGNORECASE)
+# lotes, colecciones y temporadas enteras («S02», «Season 2»): no son una película
+BATCH_RE = re.compile(r"\b(?:batch|complete|collection|seasons?|S\d{1,2})\b|\d+\s*[~-]\s*\d+\s*(?:\]|\)|$)",
+                      re.IGNORECASE)
+RESOLUTION_RE = re.compile(r"\b(?:480|576|720|1080|2160)p\b", re.IGNORECASE)
 
 
 def extract_query_from_failed_url(failed_url: str, episode: int) -> str | None:
@@ -119,6 +124,27 @@ def query_text(name: str) -> str:
     return re.sub(r"\s{2,}", " ", re.sub(r"[!?:;,.~☆★♪\"'()\[\]]", " ", name)).strip()
 
 
+def movie_key(name: str) -> str:
+    """
+    Clave de una película sin «Movie», «Gekijouban», «The Movie» ni el año:
+    "Gekijouban Seitokai Yakuindomo 2 - Movie" = "Seitokai Yakuindomo Movie 2".
+    """
+    t = re.sub(r"\(\s*\d{4}\s*\)", " ", name or "")
+    return name_key(MOVIE_MARKER_RE.sub(" ", t))
+
+
+def movie_release_names(title: str) -> set[str]:
+    """Claves (movie_key) de los nombres que da el release de una película."""
+    t = re.sub(r"\.(?:mkv|mp4|avi)$", "", strip_group_prefix(title), flags=re.IGNORECASE)
+    parts = [p for g in re.findall(r"\(([^)]*)\)", t) for p in g.split(",")]
+    if "|" in t:
+        parts += t.split("|")[1:]
+    main = re.split(r"\[|\(|\|", t.split("|")[0], maxsplit=1)[0]
+    m = RESOLUTION_RE.search(main)
+    parts.append(main[: m.start()] if m else main)
+    return {k for k in (movie_key(p.strip(" -")) for p in parts) if len(k) >= 3}
+
+
 @dataclass
 class Release:
     episode: int
@@ -191,6 +217,53 @@ class NyaaSearch:
         log.info("nyaa.si: %s capítulos para %s (temporadas %s)", len(found), names[:2], sorted(seasons))
         return dict(sorted(found.items()))
 
+    def movie(self, names, max_queries: int = 6) -> "Release | None":
+        """
+        La mejor versión de una película: que se llame como ella (sin contar
+        «Movie»/«Gekijouban»/año), sin número de capítulo, que no sea un lote,
+        sin doblaje y con subtítulos en español anunciados (o del grupo preferido).
+        """
+        wanted = {movie_key(n) for n in names if len(movie_key(n)) >= 3}
+        best, queries, seen = None, [], set()
+        for n in names:
+            q = query_text(n)
+            if q and q.lower() not in seen:
+                seen.add(q.lower())
+                queries.append(q)
+        for query in queries[:max_queries]:
+            try:
+                items = self._items(query)
+            except Exception as e:
+                log.warning("nyaa.si no responde a %r: %s", query, e)
+                continue
+            for item in items:
+                title = item.findtext("title") or ""
+                low = title.lower()
+                if any(kw in low for kw in DUB_EXCLUDE_KEYWORDS) or not self.subs_ok(title):
+                    continue
+                if BATCH_RE.search(title) or parse_nyaa_release(title)[0] is not None:
+                    continue
+                if not (movie_release_names(title) & wanted):
+                    continue
+                rel = self._build(item, title, 1)
+                if rel and (best is None or rel.rank < best.rank):
+                    best = rel
+            if best and best.preferred:
+                break
+        log.info("nyaa.si: película %s para %s", best.title if best else "no encontrada", names[:2])
+        return best
+
+    def _build(self, item, title: str, episode: int) -> "Release | None":
+        enclosure = item.find("enclosure")
+        link = enclosure.get("url") if enclosure is not None else item.findtext("link")
+        if not link:
+            return None
+        low = title.lower()
+        m = re.match(r"\s*\[([^\]]+)\]", title)
+        rank = (self.preferred_group not in low, not MULTISUB_RE.search(title),
+                not ("web-dl" in low or "webdl" in low), "1080p" not in low)
+        return Release(episode, title, link, m.group(1) if m else "", rank)
+
     def _release(self, item, wanted: set, seasons, max_episode) -> Release | None:
         title = item.findtext("title") or ""
         low = title.lower()
@@ -201,14 +274,7 @@ class NyaaSearch:
         episode, season = parse_nyaa_release(title)
         if not episode or season not in seasons or (max_episode and episode > max_episode):
             return None
-        enclosure = item.find("enclosure")
-        link = enclosure.get("url") if enclosure is not None else item.findtext("link")
-        if not link:
-            return None
-        m = re.match(r"\s*\[([^\]]+)\]", title)
-        rank = (self.preferred_group not in low, not MULTISUB_RE.search(title),
-                not ("web-dl" in low or "webdl" in low), "1080p" not in low)
-        return Release(episode, title, link, m.group(1) if m else "", rank)
+        return self._build(item, title, episode)
 
     def search(self, queries, episode: int, expected_season: int):
         """(torrent_url, título) de la mejor coincidencia, o (None, None)."""
