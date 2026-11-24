@@ -9,6 +9,7 @@ from flask import Flask, jsonify, request
 
 from .core.config import env, load_config
 from .core.util import is_japanpaw_url
+from .library.anilist import SeasonResolver
 from .library.folders import season_layout
 from .library.naming import folder_safe, name_key, split_season
 from .notify.paths import display_path
@@ -131,7 +132,8 @@ def create_app() -> Flask:
         Temporada de cada título de japanpaw (para que requester-bot marque los
         resultados como T1, T2... y ofrezca "todas"). Cuerpo: {"titles": [...]}.
         Respuesta: {"seasons": [{"title", "base", "key", "season", "subtitle"}]},
-        en el mismo orden. Se corta a los `budget` segundos (AniList es lento la
+        en el mismo orden; las películas, OVAs y especiales de una serie llevan
+        además "series", "series_key" y "format" (lo dice AniList). Se corta a los `budget` segundos (AniList es lento la
         primera vez; luego tira de caché) y lo que falte va sin AniList.
         """
         cfg = load_config()
@@ -147,7 +149,12 @@ def create_app() -> Flask:
                 late.append(t)
                 title, num, _ = split_season(t, "")
                 base, season, subtitle = folder_safe(title), str(num), ""
-            out.append({"title": t, "base": base, "key": name_key(base), "season": season, "subtitle": subtitle})
+            entry = {"title": t, "base": base, "key": name_key(base), "season": season, "subtitle": subtitle}
+            # películas, OVAs y especiales: de qué serie son, aunque el título no lo diga
+            extra = SeasonResolver().series_info(t) if t not in late and time.time() < deadline else None
+            if extra:
+                entry.update(series=extra["series"], series_key=name_key(extra["series"]), format=extra["format"])
+            out.append(entry)
         if late:
             warmer.warm(cfg, late)
         return jsonify({"seasons": out}), 200

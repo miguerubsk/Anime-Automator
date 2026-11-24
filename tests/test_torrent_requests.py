@@ -2,6 +2,7 @@
 
 import os
 import xml.etree.ElementTree as ET
+from pathlib import Path
 from unittest import mock
 
 from tests.helpers import AutomatorTestCase
@@ -271,3 +272,25 @@ class MovieTest(AniListMocked):
         self.assertEqual(result["file"], "Película 02.mkv")
         (self.root / "Anime" / "Seitokai Yakuindomo" / "Película 02.mkv").write_text("x")
         self.assertEqual(TorrentRequest(self.cfg, 1).plan()["status"], "nothing_new")
+
+    def test_movie_of_a_series_with_another_name(self):
+        """«Suzumiya Haruhi no Shoushitsu» es de «Suzumiya Haruhi no Yuuutsu» (lo dice AniList, no el título)."""
+        from automator.library.anilist import SeasonResolver
+        from automator.pipeline.torrent_requests import TorrentRequest
+        from automator.sources.nyaa import Release
+        series = self.root / "Anime" / "Suzumiya Haruhi no Yūutsu"
+        series.mkdir()
+        self.db[849] = media(849, "Suzumiya Haruhi no Yuuutsu", 14)
+        self.db[7311] = media(7311, "Suzumiya Haruhi no Shoushitsu", 1, fmt="MOVIE", prequel=849)
+        self.assertEqual(SeasonResolver().series_of(self.db[7311]), "Suzumiya Haruhi no Yuuutsu")
+        self.assertIsNone(SeasonResolver().series_of(self.db[849]))
+        rel = Release(1, "[Group] Suzumiya Haruhi no Shoushitsu [1080p][MultiSub]", "https://t.invalid/m", "Group",
+                      (False, False, False, False))
+        with mock.patch("automator.sources.nyaa.NyaaSearch.movie", return_value=rel):
+            result = TorrentRequest(self.cfg, 7311).plan()
+        self.assertEqual(Path(result["folder"]), series)
+        self.assertEqual(result["file"], "Película - Suzumiya Haruhi no Shōshitsu.mkv")
+        # la que ya está (en .mkv, con su nombre de siempre) cuenta
+        (series / "Suzumiya Haruhi no Shoushitsu.mkv").write_text("x")
+        with mock.patch("automator.sources.nyaa.NyaaSearch.movie", return_value=rel):
+            self.assertEqual(TorrentRequest(self.cfg, 7311).plan()["status"], "nothing_new")

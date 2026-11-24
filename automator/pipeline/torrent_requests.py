@@ -157,7 +157,8 @@ class TorrentRequest:
     def _plan_movie(self, m) -> dict:
         names = _names(m)
         title = names[0]
-        folder, filename, from_series = MovieLibrary(self.cfg).destination(title)
+        series = SeasonResolver().series_of(m)   # la serie aunque el título no la diga
+        folder, filename, from_series = MovieLibrary(self.cfg).destination(title, series or "")
         dest = folder / filename
         target = {"folder": str(folder), "name": Path(filename).stem if from_series else title,
                   "movie": True, "filename": filename, "key": f"movie:{dest}"}

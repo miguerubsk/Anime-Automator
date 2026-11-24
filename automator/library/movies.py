@@ -74,11 +74,37 @@ class MovieLibrary:
                 best, best_len = d, len(dk)
         return best
 
-    def destination(self, title: str) -> tuple[Path, str, bool]:
-        """(carpeta, nombre_archivo, es_de_una_serie)"""
+    def folder_named(self, series: str) -> Path | None:
+        """Carpeta de la biblioteca de esa serie (por name_key, o un override de config.yaml)."""
+        key = name_key(series)
+        if len(key) < 4:
+            return None
+        for a in self.cfg.get("animes") or []:
+            if name_key(a["watch_title"]) == key:
+                return files.base_of(Path(a["folder"]))
+        try:
+            entries = list(self.root.iterdir())
+        except OSError:
+            return None
+        return next((d for d in entries if d.name != self.movies_dirname and d.is_dir()
+                     and name_key(d.name) == key), None)
+
+    def destination(self, title: str, series: str = "") -> tuple[Path, str, bool]:
+        """
+        (carpeta, nombre_archivo, es_de_una_serie). `series` es la serie según
+        AniList, para las películas cuyo título no empieza por ella («Suzumiya
+        Haruhi no Shoushitsu» -> «Suzumiya Haruhi no Yuuutsu/Película -
+        Suzumiya Haruhi no Shoushitsu.mkv»).
+        """
         series_folder = self.find_series_folder(title)
         if series_folder is not None:
             return series_folder, movie_file_name(title), True
+        series_folder = self.folder_named(series) if series else None
+        if series_folder is not None:
+            name = movie_file_name(title)
+            if name == "Película.mkv":   # sin número ni subtítulo: con su título entero
+                name = f"Película - {folder_safe(title)}.mkv"
+            return series_folder, name, True
         return self.root / self.movies_dirname, folder_safe(title) + ".mkv", False
 
 

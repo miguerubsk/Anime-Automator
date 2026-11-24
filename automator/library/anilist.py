@@ -27,7 +27,7 @@ import requests
 
 from ..core.persistence import JsonStore
 from ..core.singleton import Singleton
-from .naming import name_key
+from .naming import name_key, split_season
 
 log = logging.getLogger("seasons")
 
@@ -250,6 +250,39 @@ class SeasonResolver:
             if not frontier:
                 break
         return False
+
+    def series_of(self, m) -> str | None:
+        """
+        Nombre de la serie de una película, OVA o especial según sus precuelas
+        (o la serie de la que cuelga), aunque el título no lo diga: «Suzumiya
+        Haruhi no Shoushitsu» es de «Suzumiya Haruhi no Yuuutsu». None si es
+        una serie o no cuelga de ninguna. Lanza AniListDown.
+        """
+        if not m or m.get("format") in MAIN_FORMATS:
+            return None
+        mains = [p for p in self._prequel_chain(m) if _is_main(p)]
+        if not mains:
+            parents = [n for n in _edges(m, "PARENT") if n.get("format") in MAIN_FORMATS]
+            parent = self.client.media(parents[0]["id"]) if parents else None
+            if not parent:
+                return None
+            mains = [parent] + [p for p in self._prequel_chain(parent) if _is_main(p)]
+        root = mains[-1]
+        title = (root.get("title") or {}).get("romaji") or _names(root)[0]
+        return split_season(title, "")[0] or None
+
+    def series_info(self, title: str, premiere: str = "", alt_titles=()) -> dict | None:
+        """{"series": nombre de la serie, "format": "MOVIE"…} de un extra por su título, o None."""
+        try:
+            m = self.find_media(title, premiere, alt_titles)
+            series = self.series_of(m)
+        except AniListDown as e:
+            log.warning("AniList no responde (%s): no sé de qué serie es %r", e, title)
+            return None
+        except Exception:
+            log.exception("Fallo buscando la serie de %r", title)
+            return None
+        return {"series": series, "format": m.get("format")} if series else None
 
     def season_info(self, title: str, premiere: str = "", alt_titles=()):
         """

@@ -11,6 +11,7 @@ from ..core.config import load_config
 from ..core.nas import assert_nas_mounted
 from ..core.util import compress_ranges
 from ..library import files
+from ..library.anilist import SeasonResolver, page_facts
 from ..library.folders import Library
 from ..library.movies import MovieLibrary, already_have_movie, looks_like_movie_title, movie_other_copies
 from ..library.naming import strip_site_suffix
@@ -213,7 +214,9 @@ class Enqueuer:
         if not url:
             return self._fail(req, "no_tab_found", f"❌ No hay ningún enlace de descarga para la película <b>{title}</b>",
                               kind="movie")
-        folder, filename, from_series = MovieLibrary(self.cfg).destination(title)
+        premiere, alts = page_facts(page.text)
+        series = (SeasonResolver().series_info(title, premiere, alts) or {}).get("series", "")
+        folder, filename, from_series = MovieLibrary(self.cfg).destination(title, series)
         dest = folder / filename
         info = {"title": title, "name": title, "folder": str(folder), "file": filename,
                 "kind": "movie", "series_folder": from_series, "available": 1}
