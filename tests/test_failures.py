@@ -1,3 +1,4 @@
+import unittest
 from unittest import mock
 
 import requests
@@ -104,3 +105,25 @@ class FailureChainTest(AutomatorTestCase):
                              f"guardado en Anime/Uno/01.mkv <code>{self.root}/Anime/x</code>")
         finally:
             self._patches[1].start()
+
+
+class PageFetchRetryTest(unittest.TestCase):
+    def test_retries_before_failing(self):
+        from automator.sources import browser
+        calls = []
+
+        def flaky(url, sp, timeout):
+            calls.append(url)
+            if len(calls) < 2:
+                raise RuntimeError("Page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE")
+            return "<html>ok</html>"
+
+        with mock.patch.object(browser, "_fetch_once", side_effect=flaky), mock.patch.object(browser.time, "sleep"):
+            self.assertEqual(browser.fetch_rendered_html("https://x.invalid", "ws://b"), "<html>ok</html>")
+        self.assertEqual(len(calls), 2)
+
+        with mock.patch.object(browser, "_fetch_once", side_effect=RuntimeError("caída")) as once, \
+                mock.patch.object(browser.time, "sleep"):
+            with self.assertRaises(RuntimeError):
+                browser.fetch_rendered_html("https://x.invalid", "ws://b")
+        self.assertEqual(once.call_count, len(browser.RETRY_DELAYS) + 1)
