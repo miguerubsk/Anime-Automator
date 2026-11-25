@@ -160,6 +160,20 @@ def _edges(m, rel):
             if e.get("relationType") == rel and (e.get("node") or {}).get("type") == "ANIME"]
 
 
+def _main_edges(m, rel):
+    return [n for n in _edges(m, rel) if n.get("format") in MAIN_FORMATS]
+
+
+def _alternative_of(m) -> list:
+    """
+    La serie de la que una OVA o especial es «versión alternativa» de un
+    capítulo («Steins;Gate: … Divide By Zero», de la que cuelga Steins;Gate 0).
+    Entre dos series de TV no vale: Fullmetal Alchemist y Brotherhood no son
+    temporadas una de otra.
+    """
+    return [] if m.get("format") in MAIN_FORMATS else _main_edges(m, "ALTERNATIVE")
+
+
 def split_title(title: str):
     """("Darker than Black", "Ryuusei no Gemini") para "Darker than Black: Ryuusei no Gemini".
     Solo con ": " (con espacio): "Re:Zero" no se parte."""
@@ -223,8 +237,7 @@ class SeasonResolver:
         """Precuelas de más reciente a más antigua (prefiriendo las de TV)."""
         chain, seen, cur = [], {m["id"]}, m
         for _ in range(MAX_HOPS):
-            # algunas segundas temporadas cuelgan como PARENT ("Horimiya: Piece")
-            pre = _edges(cur, "PREQUEL") or [n for n in _edges(cur, "PARENT") if n.get("format") in MAIN_FORMATS]
+            pre = _edges(cur, "PREQUEL") or _main_edges(cur, "PARENT") or _alternative_of(cur)
             if not pre:
                 break
             pre.sort(key=lambda n: (n.get("format") not in MAIN_FORMATS, n["id"]))
@@ -276,7 +289,8 @@ class SeasonResolver:
 
     def _parent_mains(self, m) -> list:
         """La serie de la que cuelga `m` y sus temporadas anteriores ([] si no cuelga de ninguna)."""
-        parents = [n for n in _edges(m, "PARENT") if n.get("format") in MAIN_FORMATS]
+        # algunas segundas temporadas cuelgan como PARENT ("Horimiya: Piece")
+        parents = _main_edges(m, "PARENT")
         parent = self.client.media(parents[0]["id"]) if parents else None
         if not parent:
             return []

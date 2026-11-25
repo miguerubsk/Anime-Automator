@@ -255,6 +255,22 @@ class SeasonInfoTest(AniListTestCase):
         self.assertEqual(self.info("Bucle: Dos"), ("Bucle", "2", "Dos", 60))
         self.assertIsNone(self.info("Perdida: Dos"))
 
+    def test_sequel_of_an_alternative_ova(self):
+        """Steins;Gate 0 cuelga de una OVA que solo es «versión alternativa» de un capítulo de Steins;Gate."""
+        self.add(media(80, "Steins;Gate", episodes=24, alternative=[(81, "OVA")]),
+                 media(81, "Steins;Gate: Kyoukaimenjou no Missing Link - Divide By Zero", fmt="OVA", episodes=1,
+                       alternative=[(80, "TV")], sequel=[(82, "TV")]),
+                 media(82, "Steins;Gate 0", episodes=23, prequel=[(81, "OVA")]))
+        self.api.searches["Steins;Gate 0"] = [82]
+        self.assertEqual(self.info("Steins;Gate 0"), ("Steins;Gate", "2", "0", 82))
+
+    def test_alternative_series_are_not_seasons(self):
+        """Dos series de TV alternativas (Fullmetal Alchemist y Brotherhood) no son temporadas una de otra."""
+        self.add(media(85, "Hagane no Renkinjutsushi", episodes=51),
+                 media(86, "Hagane no Renkinjutsushi: Fullmetal Alchemist", episodes=64, alternative=[(85, "TV")]))
+        self.api.searches["Hagane no Renkinjutsushi: Fullmetal Alchemist"] = [86]
+        self.assertIsNone(self.info("Hagane no Renkinjutsushi: Fullmetal Alchemist"))
+
     def test_second_season_hanging_as_parent(self):
         self.add(media(70, "Horimiya"), media(71, "Horimiya: Piece", parent=[(70, "TV")]))
         self.api.searches["Horimiya: Piece"] = [71]
@@ -283,6 +299,14 @@ class SeriesInfoTest(AniListTestCase):
 
     def test_special_hanging_from_its_series(self):
         self.assertEqual(self.series("Haruhi-chan Special"), {"series": "Haruhi-chan", "format": "SPECIAL"})
+
+    def test_ova_alternative_to_an_episode(self):
+        self.add(media(80, "Steins;Gate", episodes=24),
+                 media(81, "Steins;Gate: Kyoukaimenjou no Missing Link - Divide By Zero", fmt="OVA", episodes=1,
+                       alternative=[(80, "TV")]))
+        self.api.searches["Steins;Gate: Kyoukaimenjou no Missing Link - Divide By Zero"] = [81]
+        self.assertEqual(self.series("Steins;Gate: Kyoukaimenjou no Missing Link - Divide By Zero"),
+                         {"series": "Steins;Gate", "format": "OVA"})
 
     def test_no_series(self):
         self.assertIsNone(self.series("Suelta"))

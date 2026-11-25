@@ -137,7 +137,8 @@ def shorten_folder_name(name: str, max_bytes: int = MAX_FOLDER_NAME_BYTES) -> st
 
 
 def strip_site_suffix(raw_title: str, site_suffix: str) -> str:
-    title = raw_title.strip()
+    # la web escapa algunos signos: "Steins\;Gate"
+    title = raw_title.replace("\\", "").strip()
     if site_suffix and title.endswith(site_suffix):
         title = trim_name(title[: -len(site_suffix)])
     return title

@@ -188,6 +188,37 @@ class SeasonLayoutTest(LibraryTestCase):
         self.assertEqual((layout.base, layout.season, layout.subtitle), ("Seitokai Yakuindomo", "2", ""))
 
 
+    def test_numbered_season_takes_the_series_name_of_its_first_season(self):
+        """«Gate: … Part 2» va con «Gate: …», que según AniList es la serie «Gate»."""
+        from automator.library.folders import season_layout
+        info = {"base": "Gate", "season": "1", "subtitle": "Jieitai Kanochi nite, Kaku Tatakaeri", "anilist_id": 1}
+        with mock.patch("automator.library.anilist.SeasonResolver.season_info", return_value=info) as si:
+            layout = season_layout(self.cfg, "Gate: Jieitai Kanochi nite, Kaku Tatakaeri Part 2" + SUFFIX)
+        si.assert_called_once_with("Gate: Jieitai Kanochi nite, Kaku Tatakaeri", "", [])
+        self.assertEqual((layout.base, layout.season, layout.subtitle), ("Gate", "2", ""))
+
+    def test_numbered_season_without_subtitle_skips_anilist(self):
+        from automator.library.folders import season_layout
+        with mock.patch("automator.library.anilist.SeasonResolver.season_info") as si:
+            layout = season_layout(self.cfg, "Tensei Shitara Slime Datta Ken 4th Season" + SUFFIX)
+        si.assert_not_called()
+        self.assertEqual((layout.base, layout.season, layout.subtitle), ("Tensei Shitara Slime Datta Ken", "4", ""))
+
+    def test_numbered_season_unknown_to_anilist(self):
+        from automator.library.folders import season_layout
+        with mock.patch("automator.library.anilist.SeasonResolver.season_info", return_value=None):
+            layout = season_layout(self.cfg, "Gate: Jieitai Kanochi nite, Kaku Tatakaeri Part 2" + SUFFIX)
+        self.assertEqual((layout.base, layout.season), ("Gate - Jieitai Kanochi nite, Kaku Tatakaeri", "2"))
+
+    def test_escaped_title_from_the_site(self):
+        """La web escapa el punto y coma: «Steins\\;Gate 0»."""
+        from automator.library.folders import season_layout
+        with mock.patch("automator.library.anilist.SeasonResolver.season_info", return_value=None) as si:
+            layout = season_layout(self.cfg, "Steins\\;Gate 0" + SUFFIX)
+        si.assert_called_once_with("Steins;Gate 0", "", [])
+        self.assertEqual(layout.base, "Steins;Gate 0")
+
+
 class FolderLookupTest(LibraryTestCase):
     def test_find_folder(self):
         lib = self.library()

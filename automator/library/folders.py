@@ -11,7 +11,7 @@ from ..core.config import load_config
 from ..core.singleton import Singleton
 from ..notify.telegram import notify
 from . import files
-from .anilist import SeasonResolver, page_facts
+from .anilist import SeasonResolver, page_facts, split_title
 from .emision import EmisionLinker
 from .naming import clean_subtitle, folder_safe, name_key, split_season
 
@@ -38,6 +38,8 @@ def season_layout(cfg: dict, watch_title: str, page_text: str = "") -> SeasonLay
     """
     Nombre de la serie, temporada y subtítulo de un título de japanpaw.
     - Si el título dice la temporada ("2nd Season", "III"...), esa.
+      La serie es la del título sin la temporada: "Gate: Jieitai… Part 2" va
+      con "Gate: Jieitai…", que según AniList es la serie "Gate".
     - Si no, AniList (con la fecha de estreno y los títulos alternativos de la
       ficha para no confundirse): "Darker than Black: Ryuusei no Gemini" ->
       ("Darker than Black", "2", "Ryuusei no Gemini").
@@ -45,12 +47,15 @@ def season_layout(cfg: dict, watch_title: str, page_text: str = "") -> SeasonLay
     """
     title, season, explicit = split_season(watch_title, cfg.get("site_title_suffix", ""))
     full = folder_safe(title)
-    if not explicit:
-        premiere, alts = page_facts(page_text)
-        info = SeasonResolver().season_info(title, premiere, alts)
-        if info:
-            sub = folder_safe(clean_subtitle(info["subtitle"])) if info["subtitle"] else ""
-            return SeasonLayout(folder_safe(info["base"]), info["season"], sub, full)
+    premiere, alts = page_facts(page_text)
+    if explicit:
+        # sin subtítulo, AniList no partiría el nombre: no hace falta preguntar
+        info = SeasonResolver().season_info(title, premiere, alts) if split_title(title)[1] else None
+        return SeasonLayout(folder_safe(info["base"]) if info else full, str(season), "", full)
+    info = SeasonResolver().season_info(title, premiere, alts)
+    if info:
+        sub = folder_safe(clean_subtitle(info["subtitle"])) if info["subtitle"] else ""
+        return SeasonLayout(folder_safe(info["base"]), info["season"], sub, full)
     return SeasonLayout(full, str(season), "", full)
 
 
