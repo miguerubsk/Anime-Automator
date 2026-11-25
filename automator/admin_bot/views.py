@@ -42,6 +42,10 @@ def short(name: str, n: int = 40) -> str:
 View = tuple[str, list]  # (texto HTML, teclado)
 
 
+def paused_mark(g: GroupView) -> str:
+    return "⏸ " if g.paused else ""
+
+
 def queue_view() -> View:
     ov = queue_overview()
     lines = ["📋 <b>Cola de descargas</b>"]
@@ -53,29 +57,34 @@ def queue_view() -> View:
         lines.append("\nNo hay nada pendiente.")
     else:
         lines.append(f"\n{ov.episode_count} capítulo(s) pendientes en {len(ov.groups)} anime(s):")
-        for i, g in enumerate(ov.groups, 1):
-            parts = []
-            queued = [x.ep for x in g.of_state("queued")]
-            retries = [x.ep for x in g.of_state("retry")]
-            n_paused = sum(1 for x in g.episodes if x.paused)
-            if queued:
-                parts.append(compress_ranges(queued))
-            if retries:
-                parts.append(f"⏳ reintento: {compress_ranges(retries)}")
-            if n_paused:
-                parts.append(f"{n_paused} en pausa")
-            lines.append(f"{i}. {'⏸ ' if g.paused else ''}<b>{e(g.name)}</b> — {'; '.join(parts)}")
+        lines += [f"{i}. {paused_mark(g)}<b>{e(g.name)}</b> — {group_summary(g)}" for i, g in enumerate(ov.groups, 1)]
     if ov.torrents:
         lines.append("\n🧲 Torrents de nyaa.si:")
-        for t in ov.torrents:
-            lines.append(f"• <b>{e(t.name)}</b> {ep_label(t.ep)} ({'sembrando' if t.processed else 'descargando'})")
+        lines += [f"• <b>{e(t.name)}</b> {ep_label(t.ep)} ({'sembrando' if t.processed else 'descargando'})"
+                  for t in ov.torrents]
+    return "\n".join(lines), queue_keyboard(ov)
 
-    kb = [[btn(f"{i}. {'⏸ ' if g.paused else ''}{short(g.name)}", f"g:{gid(g.group)}")]
+
+def group_summary(g: GroupView) -> str:
+    """"1-3, 5; ⏳ reintento: 7; 1 en pausa": lo pendiente de un anime en una línea."""
+    queued = [x.ep for x in g.of_state("queued")]
+    retries = [x.ep for x in g.of_state("retry")]
+    n_paused = sum(1 for x in g.episodes if x.paused)
+    parts = [compress_ranges(queued)] if queued else []
+    if retries:
+        parts.append(f"⏳ reintento: {compress_ranges(retries)}")
+    if n_paused:
+        parts.append(f"{n_paused} en pausa")
+    return "; ".join(parts)
+
+
+def queue_keyboard(ov: QueueOverview) -> list:
+    kb = [[btn(f"{i}. {paused_mark(g)}{short(g.name)}", f"g:{gid(g.group)}")]
           for i, g in enumerate(ov.groups, 1)]
     kb.append([btn("▶️ Reanudar cola" if ov.all_paused else "⏸ Pausar cola",
                    "qa:resume" if ov.all_paused else "qa:pause"),
                btn("🔄 Actualizar", "q")])
-    return "\n".join(lines), kb
+    return kb
 
 
 def group_view(h: str, confirm_delete: bool = False) -> View | None:
@@ -96,7 +105,11 @@ def group_view(h: str, confirm_delete: bool = False) -> View | None:
     if confirm_delete:
         lines.append(f"\n⚠️ ¿Eliminar de la cola los {len(g.episodes)} capítulo(s) de este anime?")
         return "\n".join(lines), [[btn("🗑 Sí, eliminar", f"ga:{h}:delok"), btn("Cancelar", f"g:{h}")]]
+    return "\n".join(lines), group_keyboard(h, g)
 
+
+def group_keyboard(h: str, g: GroupView) -> list:
+    """Mover, pausar o eliminar el anime, y un botón por capítulo (hasta MAX_EP_BUTTONS)."""
     kb = [
         [btn("⏫ Primero", f"ga:{h}:front"), btn("⬆️ Subir", f"ga:{h}:up"),
          btn("⬇️ Bajar", f"ga:{h}:down"), btn("⏬ Último", f"ga:{h}:end")],
@@ -108,7 +121,7 @@ def group_view(h: str, confirm_delete: bool = False) -> View | None:
         kb.append([btn(f"{'⏳' if x.state == 'retry' else ('⏸' if x.paused else '')}{x.ep}", f"e:{h}:{x.ep}")
                    for x in episodes[i:i + EP_BUTTONS_PER_ROW]])
     kb.append([btn("« Volver a la cola", "q")])
-    return "\n".join(lines), kb
+    return kb
 
 
 def episode_view(h: str, ep: int) -> View | None:

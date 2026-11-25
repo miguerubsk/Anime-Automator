@@ -42,37 +42,46 @@ def restore_pending_work():
         records = data.get("items") or {}
         if not records:
             return
-        queue, retries, pending, in_progress = WorkQueue(), RetryScheduler(), PendingStore(), InProgress()
-        queue.restore_flags(data.get("paused_groups", []), data.get("all_paused", False))
-        paused = set(data.get("paused", []))
+        pending = PendingStore()   # antes de encolar: así guarda lo que se va recuperando
+        WorkQueue().restore_flags(data.get("paused_groups", []), data.get("all_paused", False))
         order = [k for k in data.get("order", []) if k in records]
-        now = time.time()
-        n_queue = n_retry = 0
-
-        # 1) lo que se estaba procesando o esperando un reintento (no está en
-        #    el orden guardado): lo que se estaba procesando vuelve al frente
-        for k, rec in records.items():
-            if k in order:
-                continue
-            item = WorkItem.from_record(rec)
-            in_progress.add(item.key)
-            if rec.get("retry_at") and rec["retry_at"] > now:
-                pending.restore_record(rec)
-                retries.add(item, rec["retry_at"])
-                n_retry += 1
-            else:
-                queue.put(item, priority=rec.get("priority", 0), at="front")
-                n_queue += 1
-        # 2) la cola, en su orden
-        for k in order:
-            rec = records[k]
-            item = WorkItem.from_record(rec)
-            in_progress.add(item.key)
-            queue.put(item, priority=rec.get("priority", 0), paused=k in paused, at="end")
-            n_queue += 1
+        n_queue, n_retry = _restore_unordered(records, order)
+        n_queue += _restore_queue(records, order, set(data.get("paused", [])))
         pending.persist()
         log.info("Cola recuperada tras reinicio: %s encolados, %s reintentos diferidos", n_queue, n_retry)
         notify(f"♻️ Reinicio: se recuperan {n_queue} capítulos pendientes"
                + (f" y {n_retry} reintentos programados" if n_retry else ""), load_config())
     except Exception:
         log.exception("No se pudo recuperar la cola de pendientes")
+
+
+def _restore_unordered(records: dict, order: list[str]) -> tuple[int, int]:
+    """
+    Lo que se estaba procesando o esperando un reintento (no está en el orden
+    guardado): lo que se estaba procesando vuelve al frente. (encolados, reintentos)
+    """
+    now = time.time()
+    n_queue = n_retry = 0
+    for k, rec in records.items():
+        if k in order:
+            continue
+        item = WorkItem.from_record(rec)
+        InProgress().add(item.key)
+        if rec.get("retry_at") and rec["retry_at"] > now:
+            PendingStore().restore_record(rec)
+            RetryScheduler().add(item, rec["retry_at"])
+            n_retry += 1
+        else:
+            WorkQueue().put(item, priority=rec.get("priority", 0), at="front")
+            n_queue += 1
+    return n_queue, n_retry
+
+
+def _restore_queue(records: dict, order: list[str], paused: set) -> int:
+    """La cola, en su orden. Devuelve cuántos se han encolado."""
+    for k in order:
+        rec = records[k]
+        item = WorkItem.from_record(rec)
+        InProgress().add(item.key)
+        WorkQueue().put(item, priority=rec.get("priority", 0), paused=k in paused, at="end")
+    return len(order)

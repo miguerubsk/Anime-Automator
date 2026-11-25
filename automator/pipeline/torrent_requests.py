@@ -15,6 +15,7 @@ la web (la carpeta de su serie o la de películas).
 """
 
 import logging
+from collections import Counter
 from pathlib import Path
 
 from ..core.nas import assert_nas_mounted
@@ -80,8 +81,11 @@ class TorrentRequest:
             return None
         # el título no empieza por el de la primera temporada: el número sale de la cadena igual
         mains = [p for p in resolver._prequel_chain(m) if _is_main(p)]
-        if not mains:
-            return None
+        return TorrentRequest._layout_after(mains, m, title, plain) if mains else None
+
+    @staticmethod
+    def _layout_after(mains: list, m, title: str, plain: str) -> SeasonLayout:
+        """Temporada siguiente a las principales de la cadena (`mains`, de la más reciente a la primera)."""
         root_title = (mains[-1].get("title") or {}).get("romaji") or _names(mains[-1])[0]
         base = split_season(root_title, "")[0]
         season = str(len(mains) + 1) if _is_main(m) else f"{len(mains)}.5"
@@ -116,6 +120,9 @@ class TorrentRequest:
         except AniListDown as e:
             return {"status": "anilist_down", "error": str(e)}
         self.media = m
+        return self._plan_series(m, layout)
+
+    def _plan_series(self, m, layout: SeasonLayout) -> dict:
         names = _names(m)
         title = names[0]
         try:
@@ -129,30 +136,38 @@ class TorrentRequest:
         releases = NyaaSearch(self.cfg).catalog(names, self._release_seasons(names, layout), total)
         target = {"folder": str(folder), "name": name}
         have = files.existing_episode_numbers(Path(folder)) | Completed().episodes_of(str(folder))
-        missing = [ep for ep in releases if ep not in have]
-        busy = [ep for ep in missing if work_key(target, ep) in InProgress()]
-        groups: dict[str, int] = {}
-        for rel in releases.values():
-            groups[rel.group or "?"] = groups.get(rel.group or "?", 0) + 1
         info = {
             "title": title, "name": name, "folder": str(folder), "season": layout.season,
             "subtitle": layout.subtitle, "new_folder": is_new, "episodes": total,
-            "found": sorted(releases), "available": len(releases),
-            # como /download: «have» es cuántos hay; la lista va aparte
-            "have": len([ep for ep in have if not total or ep <= total]),
-            "have_episodes": sorted(ep for ep in have if not total or ep <= total),
-            "missing": [ep for ep in missing if ep not in busy], "already_in_progress": busy,
-            "preferred": sum(1 for r in releases.values() if r.preferred), "groups": groups,
+            **self._episodes_info(releases, have, target, total),
         }
         self._releases, self._target = releases, target
         self._layout_used = layout
-        if not releases:
-            return {"status": "nothing_found", **info}
-        if not missing:
-            return {"status": "nothing_new", **info}
+        return {"status": self._status(info), **info}
+
+    @staticmethod
+    def _episodes_info(releases: dict, have: set, target: dict, total: int | None) -> dict:
+        """Qué hay en nyaa.si, qué hay ya, qué falta y qué se está descargando."""
+        missing = [ep for ep in releases if ep not in have]
+        busy = [ep for ep in missing if work_key(target, ep) in InProgress()]
+        # como /download: «have» es cuántos hay; la lista va aparte
+        kept = sorted(ep for ep in have if not total or ep <= total)
+        return {
+            "found": sorted(releases), "available": len(releases), "have": len(kept), "have_episodes": kept,
+            "missing": [ep for ep in missing if ep not in busy], "already_in_progress": busy,
+            "preferred": sum(1 for r in releases.values() if r.preferred),
+            "groups": dict(Counter(rel.group or "?" for rel in releases.values())),
+        }
+
+    @staticmethod
+    def _status(info: dict) -> str:
+        if not info["found"]:
+            return "nothing_found"
+        if not info["missing"] and not info["already_in_progress"]:
+            return "nothing_new"
         if not info["missing"]:
-            return {"status": "in_progress", **info}
-        return {"status": "missing", **info}
+            return "in_progress"
+        return "missing"
 
     def _plan_movie(self, m) -> dict:
         names = _names(m)
@@ -164,47 +179,51 @@ class TorrentRequest:
                   "movie": True, "filename": filename, "key": f"movie:{dest}"}
         have = already_have_movie(folder, filename)
         rel = None if have else NyaaSearch(self.cfg).movie(names)
-        busy = bool(rel) and work_key(target, 1) in InProgress()
+        releases = {1: rel} if rel else {}
         info = {
             "title": title, "name": title, "folder": str(folder), "file": filename, "kind": "movie",
             "series_folder": from_series, "season": "", "subtitle": "", "new_folder": False, "episodes": 1,
-            "found": [1] if rel else [], "available": 1 if rel else 0, "have": int(have),
-            "have_episodes": [1] if have else [], "missing": [1] if rel and not busy else [],
-            "already_in_progress": [1] if busy else [],
-            "preferred": int(bool(rel and rel.preferred)), "groups": {rel.group or "?": 1} if rel else {},
+            **self._episodes_info(releases, {1} if have else set(), target, 1),
         }
-        self._releases, self._target, self._layout_used = ({1: rel} if rel else {}), target, None
-        if have:
-            return {"status": "nothing_new", **info}
-        if not rel:
-            return {"status": "nothing_found", **info}
-        if busy:
-            return {"status": "in_progress", **info}
-        return {"status": "missing", **info}
+        self._releases, self._target, self._layout_used = releases, target, None
+        return {"status": "nothing_new" if have else self._status(info), **info}
 
     # ---------------- descarga ----------------
     def start(self, job_id=None) -> dict:
         result = self.plan()
         if result["status"] != "missing":
             return result
-        title = result["title"]
-        movie = result.get("kind") == "movie"
         try:
-            if movie:
-                Path(self._target["folder"]).mkdir(parents=True, exist_ok=True)
-                folder, name = Path(self._target["folder"]), result["name"]
-            else:
-                folder, name, _ = Library().resolve(self.cfg, title, link_emision=False, create=True,
-                                                    layout=self._layout_used)
+            folder, name, target = self._create_folder(result)
         except Exception as e:
-            log.exception("No se pudo crear la carpeta de %r", title)
+            log.exception("No se pudo crear la carpeta de %r", result["title"])
             return {**result, "status": "folder_resolution_failed", "error": str(e)}
-        target = self._target if movie else {"folder": str(folder), "name": name}
-        job = JobTracker().new_job(job_id, name, title, kind="movie" if movie else "series")
+        job = JobTracker().new_job(job_id, name, result["title"], kind=result.get("kind", "series"))
+        queued, failed = self._add_torrents(result, target, name, job)
+        if job and queued:
+            JobTracker().seal(job)
+        if not queued:
+            return {**result, "status": "transmission_failed" if failed else "in_progress",
+                    "folder": str(folder), "not_added": failed}
+        return {**result, "status": "queued", "folder": str(folder), "queued": queued, "not_added": failed,
+                "tracked": bool(job)}
+
+    def _create_folder(self, result: dict) -> tuple[Path, str, dict]:
+        """(carpeta creada, nombre del anime o la película, target de los capítulos)."""
+        if result.get("kind") == "movie":
+            folder = Path(self._target["folder"])
+            folder.mkdir(parents=True, exist_ok=True)
+            return folder, result["name"], self._target
+        folder, name, _ = Library().resolve(self.cfg, result["title"], link_emision=False, create=True,
+                                            layout=self._layout_used)
+        return folder, name, {"folder": str(folder), "name": name}
+
+    def _add_torrents(self, result: dict, target: dict, name: str, job) -> tuple[list[int], list[int]]:
+        """Añade a Transmission lo que falta. (añadidos, rechazados por Transmission)."""
         queued, failed = [], []
         for ep in result["missing"]:
             rel = self._releases[ep]
-            item = WorkItem(target, title, ep, "")
+            item = WorkItem(target, result["title"], ep, "")
             if not InProgress().try_add(item.key):
                 continue
             try:
@@ -219,10 +238,4 @@ class TorrentRequest:
             TorrentTracker().track(torrent.hashString, TrackedTorrent(item, rel.title))
             queued.append(ep)
             log.info("Torrent añadido para %s cap. %s: %s", name, ep, rel.title)
-        if job and queued:
-            JobTracker().seal(job)
-        if not queued:
-            return {**result, "status": "transmission_failed" if failed else "in_progress",
-                    "folder": str(folder), "not_added": failed}
-        return {**result, "status": "queued", "folder": str(folder), "queued": queued, "not_added": failed,
-                "tracked": bool(job)}
+        return queued, failed

@@ -77,47 +77,63 @@ class AniListClient(metaclass=Singleton):
             self._cache = {}
 
     def query(self, query: str, variables: dict):
+        """`data` de la respuesta (None si no hay), de la caché si es reciente; FAILED si AniList no responde."""
         ck = query[:20] + json.dumps(variables, sort_keys=True)
         with self._lock:
             hit = self._cache.get(ck)
-            if hit and time.time() - hit[0] < (CACHE_TTL if hit[1] is not None else NEG_CACHE_TTL):
+            if _fresh(hit):
                 return hit[1]
-            wait = MIN_INTERVAL - (time.time() - self._last_call)
-            if wait > 0:
-                time.sleep(wait)
-            self._last_call = time.time()
-        data = None
-        for attempt in (1, 2):
-            try:
-                r = requests.post(ANILIST_URL, json={"query": query, "variables": variables}, timeout=10)
-                if r.status_code == 429 and attempt == 1:
-                    time.sleep(min(float(r.headers.get("Retry-After", 10)), 30))
-                    continue
-                if r.status_code == 404:
-                    data = None
-                else:
-                    r.raise_for_status()
-                    data = r.json().get("data")
-                break
-            except (requests.RequestException, ValueError) as e:
-                log.warning("AniList no responde (%s): %s", variables, e)
-                return FAILED  # sin cachear: es un fallo temporal
+            self._wait_turn()
+        data = _post(query, variables)
+        if data is FAILED:
+            return FAILED  # sin cachear: es un fallo temporal
         with self._lock:
             self._cache[ck] = (time.time(), data)
             self._store.save(self._cache)
         return data
 
-    def media(self, mid: int):
-        data = self.query(_Q_ID, {"id": mid})
+    def _wait_turn(self):
+        wait = MIN_INTERVAL - (time.time() - self._last_call)
+        if wait > 0:
+            time.sleep(wait)
+        self._last_call = time.time()
+
+    def _ask(self, query: str, variables: dict, what) -> dict:
+        """Como query(), pero lanza AniListDown(what) si AniList no responde."""
+        data = self.query(query, variables)
         if data is FAILED:
-            raise AniListDown(mid)
-        return (data or {}).get("Media")
+            raise AniListDown(what)
+        return data or {}
+
+    def media(self, mid: int):
+        return self._ask(_Q_ID, {"id": mid}, mid).get("Media")
 
     def search(self, title: str) -> list:
-        data = self.query(_Q_SEARCH, {"s": title})
-        if data is FAILED:
-            raise AniListDown(title)
-        return ((data or {}).get("Page") or {}).get("media") or []
+        return (self._ask(_Q_SEARCH, {"s": title}, title).get("Page") or {}).get("media") or []
+
+
+def _fresh(hit) -> bool:
+    """¿Sirve aún esa respuesta de la caché? (las de "no existe" caducan antes)."""
+    return bool(hit) and time.time() - hit[0] < (CACHE_TTL if hit[1] is not None else NEG_CACHE_TTL)
+
+
+def _post(query: str, variables: dict):
+    """Una consulta a AniList (reintentando una vez si pide calma): `data`, None si no existe o FAILED."""
+    def send():
+        return requests.post(ANILIST_URL, json={"query": query, "variables": variables}, timeout=10)
+
+    try:
+        r = send()
+        if r.status_code == 429:
+            time.sleep(min(float(r.headers.get("Retry-After", 10)), 30))
+            r = send()
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        return r.json().get("data")
+    except (requests.RequestException, ValueError) as e:
+        log.warning("AniList no responde (%s): %s", variables, e)
+        return FAILED
 
 
 # ------------------------------------------------------------------ #
@@ -198,19 +214,10 @@ class SeasonResolver:
         los alternativos de japanpaw) o, si no, la fecha de estreno exacta.
         """
         cands = self.client.search(title)
-        # primero tal cual y luego sin signos: "Seitokai Yakuindomo" y
-        # "Seitokai Yakuindomo*" (la segunda) son lo mismo sin el asterisco
-        for key in (_strict, name_key):
-            wanted = {key(t) for t in (title, *alt_titles) if t}
-            for m in cands:
-                if wanted & {key(n) for n in _names(m)}:
-                    if not premiere or not _date(m) or _date(m) == premiere or len(cands) == 1:
-                        return m
-        if premiere:
-            for m in cands:
-                if _date(m) == premiere:
-                    return m
-        return None
+        found = _by_name(cands, (title, *alt_titles), premiere)
+        if found is None and premiere:
+            found = next((m for m in cands if _date(m) == premiere), None)
+        return found
 
     def _prequel_chain(self, m) -> list:
         """Precuelas de más reciente a más antigua (prefiriendo las de TV)."""
@@ -260,16 +267,20 @@ class SeasonResolver:
         """
         if not m or m.get("format") in MAIN_FORMATS:
             return None
-        mains = [p for p in self._prequel_chain(m) if _is_main(p)]
+        mains = [p for p in self._prequel_chain(m) if _is_main(p)] or self._parent_mains(m)
         if not mains:
-            parents = [n for n in _edges(m, "PARENT") if n.get("format") in MAIN_FORMATS]
-            parent = self.client.media(parents[0]["id"]) if parents else None
-            if not parent:
-                return None
-            mains = [parent] + [p for p in self._prequel_chain(parent) if _is_main(p)]
+            return None
         root = mains[-1]
         title = (root.get("title") or {}).get("romaji") or _names(root)[0]
         return split_season(title, "")[0] or None
+
+    def _parent_mains(self, m) -> list:
+        """La serie de la que cuelga `m` y sus temporadas anteriores ([] si no cuelga de ninguna)."""
+        parents = [n for n in _edges(m, "PARENT") if n.get("format") in MAIN_FORMATS]
+        parent = self.client.media(parents[0]["id"]) if parents else None
+        if not parent:
+            return []
+        return [parent] + [p for p in self._prequel_chain(parent) if _is_main(p)]
 
     def series_info(self, title: str, premiere: str = "", alt_titles=()) -> dict | None:
         """{"series": nombre de la serie, "format": "MOVIE"…} de un extra por su título, o None."""
@@ -307,30 +318,59 @@ class SeasonResolver:
             return None  # películas, OVAs, especiales: como siempre
         chain = self._prequel_chain(m)
         mains_before = sum(1 for p in chain if _is_main(p))
-
         if mains_before == 0:
-            # primera temporada: solo si tiene secuelas y el título trae subtítulo
-            # ("Darker than Black: Kuro no Keiyakusha")
-            head, tail = split_title(title)
-            if not _is_main(m) or not tail or len(name_key(head)) < 3 or not self._has_main_sequel(m):
-                return None
-            base, season = head, "1"
+            found = self._first_season(m, title)
         else:
-            root = next(p for p in reversed(chain) if _is_main(p))
-            bases = []   # en orden: el romaji de la primera temporada, primero
-            for n in _names(root):
-                bases += [n, split_title(n)[0]]
-            split = _split_on_base(title, bases)
-            if not split:
-                log.info("AniList: %r no empieza por el nombre de su primera temporada (%s)",
-                         title, _names(root)[:2])
-                return None
-            base, tail = split
-            season = str(mains_before + 1) if _is_main(m) else f"{mains_before}.5"
-
+            found = _later_season(m, title, chain, mains_before)
+        if not found:
+            return None
+        base, season, tail = found
         info = {"base": base, "season": season, "subtitle": tail, "anilist_id": m["id"]}
         log.info("Temporada según AniList: %r -> %s", title, info)
         return info
+
+    def _first_season(self, m, title: str):
+        """
+        (serie, "1", subtítulo) de una primera temporada: solo si tiene
+        secuelas y el título trae subtítulo ("Darker than Black: Kuro no Keiyakusha").
+        """
+        head, tail = split_title(title)
+        if not _is_main(m) or not tail or len(name_key(head)) < 3 or not self._has_main_sequel(m):
+            return None
+        return head, "1", tail
+
+
+def _later_season(m, title: str, chain: list, mains_before: int):
+    """(serie, temporada, subtítulo) partiendo el título por el nombre de la primera temporada, o None."""
+    root = next(p for p in reversed(chain) if _is_main(p))
+    bases = []   # en orden: el romaji de la primera temporada, primero
+    for n in _names(root):
+        bases += [n, split_title(n)[0]]
+    split = _split_on_base(title, bases)
+    if not split:
+        log.info("AniList: %r no empieza por el nombre de su primera temporada (%s)",
+                 title, _names(root)[:2])
+        return None
+    base, tail = split
+    season = str(mains_before + 1) if _is_main(m) else f"{mains_before}.5"
+    return base, season, tail
+
+
+def _premiere_ok(m, premiere: str, n_cands: int) -> bool:
+    """Una entrada con el título buscado vale si no contradice la fecha de estreno (o es la única)."""
+    return not premiere or not _date(m) or _date(m) == premiere or n_cands == 1
+
+
+def _by_name(cands: list, titles, premiere: str):
+    """La primera entrada cuyo nombre coincide con uno de `titles` (y no contradice el estreno)."""
+    # primero tal cual y luego sin signos: "Seitokai Yakuindomo" y
+    # "Seitokai Yakuindomo*" (la segunda) son lo mismo sin el asterisco
+    for key in (_strict, name_key):
+        wanted = {key(t) for t in titles if t}
+        for m in cands:
+            if wanted & {key(n) for n in _names(m)} and _premiere_ok(m, premiere, len(cands)):
+                return m
+    return None
 
 
 # ------------------------------------------------------------------ #

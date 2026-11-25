@@ -154,37 +154,47 @@ class TorrentTracker(BackgroundLoop, metaclass=Singleton):
         time.sleep(self.poll_seconds)
 
     def _check(self, cfg: dict, client, torrent_hash: str, tracked: TrackedTorrent):
-        item = tracked.item
+        t = self._fetch(client, torrent_hash, tracked)
+        if t is None:
+            return
+        if not tracked.processed and not self._advance(cfg, client, torrent_hash, tracked, t):
+            return
+        if tracked.processed and "stop" in str(getattr(t, "status", "")).lower():
+            # ya paró de sembrar solo (por haber alcanzado el ratio límite)
+            Transmission.remove(client, torrent_hash, "alcanzó el ratio de siembra")
+            self.forget(torrent_hash)
+
+    def _fetch(self, client, torrent_hash: str, tracked: TrackedTorrent):
+        """El torrent en Transmission, o None si no se puede consultar ahora o ya no está."""
         try:
-            t = client.get_torrent(torrent_hash)
+            return client.get_torrent(torrent_hash)
         except KeyError:
             # ya no está en Transmission (borrado a mano): dejar de seguirlo
             log.info("El torrent %s ya no existe en Transmission, se deja de seguir", torrent_hash)
             self.forget(torrent_hash)
             if not tracked.processed:
-                InProgress().discard(item.key)
-            return
+                InProgress().discard(tracked.item.key)
         except Exception:
             log.exception("No se pudo consultar el torrent %s en Transmission", torrent_hash)
-            return
+        return None
 
-        if not tracked.processed:
-            if (getattr(t, "percent_done", 0) or 0) >= 1.0:
-                if not self._process_completed(cfg, client, torrent_hash, tracked, t):
-                    return
-            elif time.time() - tracked.added_at > cfg["transmission"].get("torrent_wait_timeout_hours", 48) * 3600:
-                self._give_up(client, torrent_hash, tracked, "timeout sin completarse",
-                              f"el torrent \"{tracked.nyaa_title}\" no se completó a tiempo",
-                              lambda: f"❌ (nyaa.si) El torrent de <b>{item.title}</b> Capítulo "
-                                      f"{item.episode:02d} lleva demasiado tiempo sin completarse "
-                                      f"(\"{tracked.nyaa_title}\"). Se elimina y se descarta."
-                                      f"{BatchProgress().block()}")
-                return
-
-        if tracked.processed and "stop" in str(getattr(t, "status", "")).lower():
-            # ya paró de sembrar solo (por haber alcanzado el ratio límite)
-            Transmission.remove(client, torrent_hash, "alcanzó el ratio de siembra")
-            self.forget(torrent_hash)
+    def _advance(self, cfg: dict, client, torrent_hash: str, tracked: TrackedTorrent, t) -> bool:
+        """
+        Un torrent aún sin procesar: si se ha completado, se procesa; si tarda
+        demasiado, se descarta. False si ya no hay nada más que hacer con él.
+        """
+        if (getattr(t, "percent_done", 0) or 0) >= 1.0:
+            return self._process_completed(cfg, client, torrent_hash, tracked, t)
+        if time.time() - tracked.added_at > cfg["transmission"].get("torrent_wait_timeout_hours", 48) * 3600:
+            item = tracked.item
+            self._give_up(client, torrent_hash, tracked, "timeout sin completarse",
+                          f"el torrent \"{tracked.nyaa_title}\" no se completó a tiempo",
+                          lambda: f"❌ (nyaa.si) El torrent de <b>{item.title}</b> Capítulo "
+                                  f"{item.episode:02d} lleva demasiado tiempo sin completarse "
+                                  f"(\"{tracked.nyaa_title}\"). Se elimina y se descarta."
+                                  f"{BatchProgress().block()}")
+            return False
+        return True
 
     def _process_completed(self, cfg, client, torrent_hash, tracked: TrackedTorrent, t) -> bool:
         item = tracked.item

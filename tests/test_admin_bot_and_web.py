@@ -9,7 +9,9 @@ def plain(text):
     return re.sub(r"<[^>]+>", "", text)
 
 
-class AdminBotTest(AutomatorTestCase):
+class QueuedTestCase(AutomatorTestCase):
+    """Chat 100 autorizado y en la cola: «Uno» 1-3 y «Dos» 1."""
+
     def setUp(self):
         super().setUp()
         os.environ["ADMIN_BOT_CHAT_IDS"] = "100"
@@ -20,6 +22,8 @@ class AdminBotTest(AutomatorTestCase):
             WorkQueue().put(self.item("Uno", ep), priority=1)
         WorkQueue().put(self.item("Dos", 1), priority=1)
 
+
+class AdminBotTest(QueuedTestCase):
     def bot(self):
         from automator.admin_bot.bot import AdminBot
         bot = AdminBot()
@@ -73,6 +77,65 @@ class AdminBotTest(AutomatorTestCase):
         self.assertIn("No veo una URL válida", bot.replies[-1][1])
         bot.on_message({"chat": {"id": 100}, "text": "/loquesea"})
         self.assertIn("Anime-Automator", bot.replies[-1][1])
+
+
+class AdminBotLoopTest(QueuedTestCase):
+    """El bucle contra la Bot API falseada en la frontera (requests.post)."""
+
+    def run_steps(self, answers, steps=1):
+        """answers: {método: [respuestas sucesivas]}; devuelve [(método, json, timeout)] de lo que se llamó."""
+        from automator.admin_bot.bot import AdminBot
+        calls = []
+
+        def fake_post(url, json=None, timeout=None):
+            method = url.rsplit("/", 1)[1]
+            calls.append((method, json, timeout))
+            queue = answers.get(method) or [{"ok": True, "result": True}]
+            data = queue.pop(0) if len(queue) > 1 else queue[0]
+            resp = mock.Mock()
+            resp.json.return_value = data
+            return resp
+
+        os.environ["ADMIN_BOT_TOKEN"] = "T"
+        bot = AdminBot()
+        with mock.patch("automator.notify.telegram.requests.post", fake_post), \
+             mock.patch("automator.admin_bot.bot.time.sleep") as sleep:
+            for _ in range(steps):
+                bot.step()
+        return calls, sleep
+
+    def test_receives_and_answers(self):
+        updates = [{"update_id": 7, "message": {"chat": {"id": 100}, "text": "/cola"}},
+                   {"update_id": 8, "edited_message": {}},
+                   {"update_id": 9, "callback_query": {"id": "cb", "data": "q",
+                                                       "message": {"chat": {"id": 100}, "message_id": 5}}}]
+        calls, sleep = self.run_steps({"getUpdates": [{"ok": True, "result": updates},
+                                                      {"ok": True, "result": []}]}, steps=2)
+        self.assertEqual([m for m, _, _ in calls], ["setMyCommands", "getUpdates", "sendMessage",
+                                                    "answerCallbackQuery", "editMessageText", "getUpdates"])
+        self.assertEqual([c["command"] for c in calls[0][1]["commands"]],
+                         ["cola", "descargar", "pausar", "reanudar", "ayuda"])
+        self.assertEqual(calls[1][1:], ({"timeout": 30, "allowed_updates": ["message", "callback_query"]}, 40))
+        self.assertIn("4 capítulo(s) pendientes", plain(calls[2][1]["text"]))
+        self.assertEqual(calls[5][1]["offset"], 10)
+        sleep.assert_not_called()
+
+    def test_commands_retried_until_set(self):
+        calls, _ = self.run_steps({"setMyCommands": [{"ok": False}, {"ok": True, "result": True}],
+                                   "getUpdates": [{"ok": True, "result": []}]}, steps=3)
+        self.assertEqual([m for m, _, _ in calls].count("setMyCommands"), 2)
+
+    def test_bad_update_does_not_stop_the_rest(self):
+        updates = [{"update_id": 1, "message": {"text": "sin chat"}},
+                   {"update_id": 2, "message": {"chat": {"id": 100}, "text": "/ayuda"}}]
+        with self.assertLogs("anime-automator.admin-bot", "ERROR"):
+            calls, _ = self.run_steps({"getUpdates": [{"ok": True, "result": updates}]})
+        self.assertIn("Anime-Automator", calls[-1][1]["text"])
+
+    def test_without_network_waits(self):
+        calls, sleep = self.run_steps({"getUpdates": [{"ok": False, "description": "Unauthorized"}]})
+        sleep.assert_called_once_with(5)
+        self.assertEqual([m for m, _, _ in calls], ["setMyCommands", "getUpdates"])
 
 
 class WebTest(AutomatorTestCase):

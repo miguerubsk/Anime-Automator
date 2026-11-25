@@ -1,3 +1,5 @@
+import subprocess
+from pathlib import Path
 from unittest import mock
 
 import requests
@@ -111,3 +113,77 @@ class SourceOrderTest(AutomatorTestCase):
         ctx = self.ctx(item, SourceContentError("mkvmerge falló"))
         self.assertIsNone(DriveMirrorHandler().handle(ctx))  # sigue la cadena normal
         self.assertIsNone(ctx.item.target["source"])
+
+
+class FakeRclone:
+    """subprocess.Popen de rclone copyto: escribe el destino (si `writes`) y sale con `code`."""
+
+    def __init__(self, stderr_lines, code=0, writes=True):
+        self.stderr_lines, self.code, self.writes, self.cmds = stderr_lines, code, writes, []
+
+    def __call__(self, cmd, **kwargs):
+        self.cmds.append(cmd)
+        if self.writes:
+            Path(cmd[3]).write_bytes(b"x" * 10)
+        proc = mock.MagicMock()
+        proc.__enter__.return_value = proc
+        proc.stderr = iter(self.stderr_lines)
+        proc.wait.return_value = self.code
+        return proc
+
+
+class RcloneTest(AutomatorTestCase):
+    def mirror(self, **extra):
+        from automator.sources.drive import DriveMirror
+        return DriveMirror({"drive_mirror": {**DRIVE_CFG["drive_mirror"], **extra}})
+
+    def test_download_ok(self):
+        fake = FakeRclone(["2026/01/01 NOTICE: Transferred: 1 GiB / 2 GiB, 50%\n", "\n", "otra línea\n"])
+        dest = self.root / "tmp" / "x.mkv"
+        with mock.patch("automator.sources.drive.subprocess.Popen", fake), \
+             self.assertLogs("anime-automator", "INFO") as logs:
+            self.mirror(rclone_config="/c/rclone.conf").download("japanpaw:Anime/x.mkv", dest, "X 01")
+        self.assertTrue(dest.exists())
+        self.assertEqual(fake.cmds[0][:4], ["rclone", "copyto", "japanpaw:Anime/x.mkv", str(dest)])
+        self.assertEqual(fake.cmds[0][fake.cmds[0].index("--config") + 1], "/c/rclone.conf")
+        self.assertIn("Drive X 01: Transferred: 1 GiB / 2 GiB, 50%", "\n".join(logs.output))
+        self.assertNotIn("otra línea", "\n".join(logs.output))
+
+    def test_download_failure_removes_partial_file(self):
+        fake = FakeRclone(["NOTICE: algo\n", "ERROR : x.mkv: downloadQuotaExceeded\n"], code=1)
+        dest = self.root / "tmp" / "x.mkv"
+        with mock.patch("automator.sources.drive.subprocess.Popen", fake):
+            with self.assertRaisesRegex(Exception, r"rclone falló \(1\): ERROR : x.mkv: downloadQuotaExceeded"):
+                self.mirror().download("japanpaw:Anime/x.mkv", dest)
+        self.assertFalse(dest.exists())
+        self.assertEqual(fake.cmds[0][fake.cmds[0].index("--config") + 1], "/config/rclone/rclone.conf")
+
+    def test_download_without_file_and_without_output(self):
+        from automator.sources.drive import DriveError
+        with mock.patch("automator.sources.drive.subprocess.Popen", FakeRclone([], writes=False)):
+            with self.assertRaisesRegex(DriveError, r"rclone falló \(0\): sin salida"):
+                self.mirror().download("japanpaw:Anime/x.mkv", self.root / "tmp" / "x.mkv")
+
+    def test_listing(self):
+        runs = []
+
+        def fake_run(cmd, **kwargs):
+            runs.append(cmd)
+            out = "A/\nB/\n\n" if cmd[1] == "lsf" else '[{"Path": "a.mkv"}]'
+            return subprocess.CompletedProcess(cmd, 0, out, "")
+
+        m = self.mirror(rclone_config="/c/r.conf")
+        with mock.patch("automator.sources.drive.subprocess.run", fake_run):
+            self.assertEqual(m.list_dirs("japanpaw-emision:"), ["A", "B"])
+            self.assertEqual(m.list_recent_files("japanpaw:Anime", "/X/", 3), [{"Path": "a.mkv"}])
+        self.assertEqual(runs[0], ["rclone", "lsf", "--dirs-only", "japanpaw-emision:", "--config", "/c/r.conf"])
+        self.assertEqual(runs[1][-3:], ["japanpaw:Anime/X", "--config", "/c/r.conf"])
+        self.assertIn("3d", runs[1])
+
+    def test_listing_failure(self):
+        from automator.sources.drive import DriveError
+        for stderr, last in (("uno\ndirectory not found\n", "directory not found"), ("", "sin salida")):
+            failed = subprocess.CompletedProcess([], 3, "", stderr)
+            with mock.patch("automator.sources.drive.subprocess.run", return_value=failed):
+                with self.assertRaisesRegex(DriveError, rf"rclone lsf falló \(3\): {last}"):
+                    self.mirror().list_dirs("japanpaw:Anime")

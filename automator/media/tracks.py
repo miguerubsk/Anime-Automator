@@ -92,23 +92,8 @@ class StrictTrackPolicy:
     def select(self, info: dict, cfg: dict) -> TrackSelection:
         classifier = SpanishClassifier(cfg)
         tracks = info["tracks"]
-        audio = [t for t in tracks if t["type"] == "audio"]
-        subs = [t for t in tracks if t["type"] == "subtitles"]
-
-        jpn_audio = next((t for t in audio if lang_of(t) in JAPANESE), None)
-        if jpn_audio is None:
-            jpn_audio = self.guess_japanese_audio(audio, info)
-        spa_audio = classifier.best([t for t in audio if lang_of(t) in SPANISH])
-        keep_audio_ids = [t["id"] for t in (jpn_audio, spa_audio) if t]
-        if not keep_audio_ids:
-            fallback = self.fallback_audio(audio)
-            if fallback:
-                jpn_audio, keep_audio_ids = fallback, [fallback["id"]]
-
-        chosen_sub = classifier.best([t for t in subs if lang_of(t) in SPANISH])
-        waived = False
-        if chosen_sub is None:
-            chosen_sub, waived = self.guess_spanish_sub(subs, info)
+        jpn_audio, keep_audio_ids = self._choose_audio([t for t in tracks if t["type"] == "audio"], info, classifier)
+        chosen_sub, waived = self._choose_sub([t for t in tracks if t["type"] == "subtitles"], info, classifier)
         keep_sub_ids = [chosen_sub["id"]] if chosen_sub else []
 
         video_ids = [t["id"] for t in tracks if t["type"] == "video"]
@@ -120,6 +105,26 @@ class StrictTrackPolicy:
             clear_name_ids=video_ids + keep_audio_ids + keep_sub_ids,
             sub_requirement_waived=waived,
         )
+
+    def _choose_audio(self, audio, info, classifier):
+        """(pista que cuenta como japonesa o None, [ids de audio que se conservan])."""
+        jpn_audio = next((t for t in audio if lang_of(t) in JAPANESE), None)
+        if jpn_audio is None:
+            jpn_audio = self.guess_japanese_audio(audio, info)
+        spa_audio = classifier.best([t for t in audio if lang_of(t) in SPANISH])
+        keep_audio_ids = [t["id"] for t in (jpn_audio, spa_audio) if t]
+        if not keep_audio_ids:
+            fallback = self.fallback_audio(audio)
+            if fallback:
+                jpn_audio, keep_audio_ids = fallback, [fallback["id"]]
+        return jpn_audio, keep_audio_ids
+
+    def _choose_sub(self, subs, info, classifier):
+        """(subtítulo elegido o None, ¿se renuncia a exigir subtítulos?)."""
+        chosen_sub = classifier.best([t for t in subs if lang_of(t) in SPANISH])
+        if chosen_sub is not None:
+            return chosen_sub, False
+        return self.guess_spanish_sub(subs, info)
 
 
 class JapanPawTrackPolicy(StrictTrackPolicy):
@@ -150,17 +155,24 @@ class JapanPawTrackPolicy(StrictTrackPolicy):
         untagged = [t for t in sub_tracks if lang_of(t) in UNTAGGED_LANGS]
         if len(untagged) == 1:
             return untagged[0], False
-        candidates = untagged or sub_tracks
         path = info.get("file_name")
-        for t in candidates:
-            text = subtitle_text(path, t) if path else ""
-            if text and looks_spanish(text):
-                return t, False
+        found = _first_spanish(untagged or sub_tracks, path)
+        if found is not None:
+            return found, False
         if untagged and not any(is_text_sub(t) for t in untagged):
             return untagged[0], False  # imagen (PGS/VobSub): no se puede leer, el primero
         log.warning("No identifico subtítulos en español en %s (pistas %s): se sigue sin subtítulos",
                     path, [t["id"] for t in sub_tracks])
         return None, True
+
+
+def _first_spanish(tracks, path):
+    """La primera pista de subtítulos cuyo texto está en español (sin archivo no se lee nada)."""
+    for t in tracks:
+        text = subtitle_text(path, t) if path else ""
+        if text and looks_spanish(text):
+            return t
+    return None
 
 
 # ------------------------------------------------------------------ #
@@ -182,14 +194,24 @@ def subtitle_text(path: str, track, limit: int = 200_000) -> str:
     if not is_text_sub(track):
         return ""
     try:
-        with tempfile.TemporaryDirectory(dir=Path(path).parent) as tmp:
-            out = Path(tmp) / "sub.txt"
-            subprocess.run(["mkvextract", str(path), "tracks", f"{track['id']}:{out}"],
-                           capture_output=True, timeout=120, check=True)
-            raw = out.read_text("utf-8", "replace")[:limit]
+        raw = _extract_track(path, track["id"])[:limit]
     except Exception as e:
         log.debug("No se pudo extraer la pista %s de %s: %s", track.get("id"), path, e)
         return ""
+    return dialogue_text(raw)
+
+
+def _extract_track(path: str, track_id) -> str:
+    """El contenido de una pista (mkvextract), en un directorio temporal junto al vídeo."""
+    with tempfile.TemporaryDirectory(dir=Path(path).parent) as tmp:
+        out = Path(tmp) / "sub.txt"
+        subprocess.run(["mkvextract", str(path), "tracks", f"{track_id}:{out}"],
+                       capture_output=True, timeout=120, check=True)
+        return out.read_text("utf-8", "replace")
+
+
+def dialogue_text(raw: str) -> str:
+    """Solo el texto de los diálogos de un .ass/.srt (sin tiempos, números de línea ni etiquetas)."""
     lines = []
     for line in raw.splitlines():
         if line.startswith("Dialogue:"):

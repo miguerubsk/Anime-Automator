@@ -50,27 +50,19 @@ class MovieLibrary:
         respetan también los overrides de config.yaml.
         """
         words = norm_words(title)
-        for a in self.cfg.get("animes") or []:
-            if norm_words(a["watch_title"]) == words:
-                return files.base_of(Path(a["folder"]))
-        try:
-            entries = list(self.root.iterdir())
-        except OSError:
-            return None
+        override = self._override_where(lambda watch_title: norm_words(watch_title) == words)
+        if override is not None:
+            return override
         # claves de cada principio del título que acaba en palabra completa:
         # "Dandadan Movie" -> {"dandadan": 1}; así "Dan Da Dan" también casa
         prefixes = {}
         for i in range(1, len(words)):  # tiene que sobrar título (si es idéntico, es una peli original)
             prefixes.setdefault(name_key(" ".join(words[:i])), i)
         best, best_len = None, 0
-        for d in entries:
-            if d.name == self.movies_dirname or not d.is_dir():
-                continue
+        for d in self._series_dirs():
             dk = name_key(d.name)
             # mínimo 4 letras para no casar carpetas tipo "K" o "86" por casualidad
-            if len(dk) < 4 or dk not in prefixes:
-                continue
-            if len(dk) > best_len:
+            if len(dk) >= 4 and dk in prefixes and len(dk) > best_len:
                 best, best_len = d, len(dk)
         return best
 
@@ -79,15 +71,25 @@ class MovieLibrary:
         key = name_key(series)
         if len(key) < 4:
             return None
+        override = self._override_where(lambda watch_title: name_key(watch_title) == key)
+        if override is not None:
+            return override
+        return next((d for d in self._series_dirs() if name_key(d.name) == key), None)
+
+    def _override_where(self, same) -> Path | None:
+        """Carpeta de la serie del primer override de config.yaml cuyo watch_title cumple `same`."""
         for a in self.cfg.get("animes") or []:
-            if name_key(a["watch_title"]) == key:
+            if same(a["watch_title"]):
                 return files.base_of(Path(a["folder"]))
+        return None
+
+    def _series_dirs(self) -> list[Path]:
+        """Carpetas de la biblioteca salvo la de películas ([] si no se puede leer)."""
         try:
             entries = list(self.root.iterdir())
         except OSError:
-            return None
-        return next((d for d in entries if d.name != self.movies_dirname and d.is_dir()
-                     and name_key(d.name) == key), None)
+            return []
+        return [d for d in entries if d.name != self.movies_dirname and d.is_dir()]
 
     def destination(self, title: str, series: str = "") -> tuple[Path, str, bool]:
         """

@@ -96,16 +96,7 @@ class Library(metaclass=Singleton):
         m = re.fullmatch(r"(.*\S)\s+\((\d{4})\)", name)
         if not m or season <= 1 or (anime_root / name).exists():
             return name
-        base, year = m.group(1), int(m.group(2))
-        pattern = re.compile(re.escape(base) + r"\s+\((\d{4})\)", re.IGNORECASE)
-        earlier = []
-        try:
-            for d in anime_root.iterdir():
-                mm = pattern.fullmatch(d.name)
-                if mm and int(mm.group(1)) < year and d.is_dir():
-                    earlier.append((int(mm.group(1)), d.name))
-        except OSError:
-            return name
+        earlier = _earlier_years(anime_root, m.group(1), int(m.group(2)))
         return max(earlier)[1] if earlier else name
 
     @staticmethod
@@ -141,51 +132,49 @@ class Library(metaclass=Singleton):
 
         override = find_override(cfg, watch_title)
         if override is not None:
-            base = files.base_of(override)
-            if link:
-                EmisionLinker(cfg).ensure(base.name, base)
-            return override, base.name, False
+            return self._existing(cfg, override, files.base_of(override), link)
 
-        anime_root = Path(cfg["anime_root"])
         layout = layout or season_layout(cfg, watch_title, page_text)
-        name, season, subtitle = layout.base, layout.season, layout.subtitle
-
-        # (no vale la carpeta de la propia serie: "Seitokai Yakuindomo*" se llamaría igual)
-        legacy = self.find_folder(cfg, layout.full) if subtitle and name_key(layout.full) != name_key(name) else None
+        legacy = self._legacy_folder(cfg, layout)
         if legacy is not None:
             # temporada guardada a la antigua, en su propia carpeta
-            log.info("Uso la carpeta existente %r para %r (temporada %s)", legacy.name, layout.full, season)
-            if link:
-                EmisionLinker(cfg).ensure(legacy.name, legacy)
-            return legacy, legacy.name, False
+            log.info("Uso la carpeta existente %r para %r (temporada %s)", legacy.name, layout.full, layout.season)
+            return self._existing(cfg, legacy, legacy, link)
 
-        if season.isdigit():
-            name = self.merge_with_earlier_year(anime_root, name, int(season))
+        name, is_new = self._series_name(cfg, layout)
+        spot = SeasonSpot(Path(cfg["anime_root"]) / name, layout.season, layout.subtitle)
+        if not create:
+            return (spot.base_folder if spot.in_root(is_new) else spot.target()), name, is_new
+        return self._create(cfg, watch_title, spot, is_new, link_emision), name, is_new
+
+    @staticmethod
+    def _existing(cfg: dict, folder: Path, base: Path, link: bool):
+        """Resultado de resolve() para una carpeta que ya está decidida (override o temporada a la antigua)."""
+        if link:
+            EmisionLinker(cfg).ensure(base.name, base)
+        return folder, base.name, False
+
+    def _legacy_folder(self, cfg: dict, layout: SeasonLayout) -> Path | None:
+        """Carpeta propia con el título entero de una temporada con subtítulo, si ya existe."""
+        # (no vale la carpeta de la propia serie: "Seitokai Yakuindomo*" se llamaría igual)
+        if not layout.subtitle or name_key(layout.full) == name_key(layout.base):
+            return None
+        return self.find_folder(cfg, layout.full)
+
+    def _series_name(self, cfg: dict, layout: SeasonLayout) -> tuple[str, bool]:
+        """(nombre de la carpeta de la serie, ¿hay que crearla?)."""
+        name = layout.base
+        if layout.season.isdigit():
+            name = self.merge_with_earlier_year(Path(cfg["anime_root"]), name, int(layout.season))
         existing = self.find_folder(cfg, name)
         if existing is not None and existing.name != name:
             log.info("Uso la carpeta existente %r para %r", existing.name, name)
             name = existing.name
-        base_folder = anime_root / name
-        is_new = existing is None
-        season_dir_name = f"Temporada {season}" + (f" ({subtitle})" if subtitle else "")
+        return name, existing is None
 
-        def season_dirs_present():
-            return base_folder.exists() and any(
-                p.is_dir() and p.name.startswith("Temporada") for p in base_folder.iterdir())
-
-        def season_target():
-            return files.find_season_dir(base_folder, season) or base_folder / season_dir_name
-
-        # temporada 1 sin subtítulo y sin carpetas de temporada: en la raíz, como siempre
-        plain_first = season == "1" and not subtitle
-
-        if not create:
-            if season == "1" and not is_new and not season_dirs_present():
-                return base_folder, name, is_new  # la primera temporada suelta en la raíz
-            if plain_first and not season_dirs_present():
-                return base_folder, name, is_new
-            return season_target(), name, is_new
-
+    def _create(self, cfg: dict, watch_title: str, spot: "SeasonSpot", is_new: bool, link_emision: bool) -> Path:
+        """Crea lo que haga falta (serie, enlace de emisión, carpeta de temporada) y devuelve el destino."""
+        base_folder, name = spot.base_folder, spot.base_folder.name
         if is_new:
             base_folder.mkdir(parents=True, exist_ok=True)
             notify(f"📁 Carpeta nueva creada automáticamente: <b>{name}</b> "
@@ -196,13 +185,13 @@ class Library(metaclass=Singleton):
         if link_emision:
             EmisionLinker(cfg).ensure(name, base_folder)
 
-        if season == "1" and not season_dirs_present() and (not is_new or plain_first):
-            return base_folder, name, is_new
-        target = season_target()
+        if spot.in_root(is_new):
+            return base_folder
+        target = spot.target()
         target.mkdir(parents=True, exist_ok=True)
         # ha llegado otra temporada: la 1 (suelta en la raíz) a su carpeta
         self.organize_seasons(cfg, base_folder)
-        return target, name, is_new
+        return target
 
     def placement_folder(self, cfg: dict, target: dict) -> tuple[Path, Path | None, bool]:
         """
@@ -236,23 +225,11 @@ class Library(metaclass=Singleton):
             if t1 is not None and files.episode_files(t1):
                 # ya hay una Temporada 1 con capítulos: los sueltos no son la 1
                 # (p.ej. capítulos de otra temporada puestos a mano). No se tocan.
-                if base_folder.name not in self._organize_warned:
-                    self._organize_warned.add(base_folder.name)
-                    names = ", ".join(f.name for f in loose[:6]) + ("…" if len(loose) > 6 else "")
-                    notify(f"⚠️ <b>{base_folder.name}</b> tiene capítulos sueltos en la raíz ({names}) "
-                           f"y además una '{t1.name}' con capítulos. No sé de qué temporada son: "
-                           f"no los muevo, revísalos a mano.", cfg)
+                self._warn_unknown_season(cfg, base_folder, t1, loose)
                 return 0
             t1 = t1 or base_folder / "Temporada 1"
             t1.mkdir(parents=True, exist_ok=True)
-            moved, clashes = 0, []
-            for f in loose:
-                target = t1 / f.name
-                if target.exists():
-                    clashes.append(f.name)
-                    continue
-                os.replace(f, target)  # misma NAS: renombrar, no copiar
-                moved += 1
+            moved, clashes = move_loose_episodes(loose, t1)
         if moved:
             log.info("Reorganizado %s: %s capítulo(s) de la raíz a %s", base_folder.name, moved, t1.name)
             notify(f"🗂️ Reorganizado <b>{base_folder.name}</b>: {moved} capítulo(s) sueltos "
@@ -262,6 +239,69 @@ class Library(metaclass=Singleton):
                    f"en '{t1.name}'. No he movido esos: revísalos a mano.", cfg)
         return moved
 
+    def _warn_unknown_season(self, cfg: dict, base_folder: Path, t1: Path, loose: list[Path]):
+        """Avisa (una vez por serie) de capítulos sueltos que no se sabe de qué temporada son."""
+        if base_folder.name in self._organize_warned:
+            return
+        self._organize_warned.add(base_folder.name)
+        names = ", ".join(f.name for f in loose[:6]) + ("…" if len(loose) > 6 else "")
+        notify(f"⚠️ <b>{base_folder.name}</b> tiene capítulos sueltos en la raíz ({names}) "
+               f"y además una '{t1.name}' con capítulos. No sé de qué temporada son: "
+               f"no los muevo, revísalos a mano.", cfg)
+
+
+@dataclass
+class SeasonSpot:
+    """Dónde va una temporada dentro de la carpeta de su serie."""
+    base_folder: Path
+    season: str
+    subtitle: str
+
+    def in_root(self, is_new: bool) -> bool:
+        """
+        La temporada 1 va suelta en la raíz mientras no haya carpetas de
+        temporada (si la serie es nueva, solo cuando no trae subtítulo).
+        """
+        return self.season == "1" and (not is_new or not self.subtitle) and not self._season_dirs_present()
+
+    def target(self) -> Path:
+        """Su carpeta "Temporada N" (la que ya haya, lleve el subtítulo que lleve)."""
+        name = f"Temporada {self.season}" + (f" ({self.subtitle})" if self.subtitle else "")
+        return files.find_season_dir(self.base_folder, self.season) or self.base_folder / name
+
+    def _season_dirs_present(self) -> bool:
+        return self.base_folder.exists() and any(
+            p.is_dir() and p.name.startswith("Temporada") for p in self.base_folder.iterdir())
+
+
+def _earlier_years(anime_root: Path, base: str, year: int) -> list[tuple[int, str]]:
+    """[(año, carpeta)] de las carpetas "<base> (año)" de años anteriores a `year`."""
+    pattern = re.compile(re.escape(base) + r"\s+\((\d{4})\)", re.IGNORECASE)
+    earlier = []
+    try:
+        for d in anime_root.iterdir():
+            mm = pattern.fullmatch(d.name)
+            if mm and int(mm.group(1)) < year and d.is_dir():
+                earlier.append((int(mm.group(1)), d.name))
+    except OSError:
+        return []
+    return earlier
+
+
+def move_loose_episodes(loose: list[Path], t1: Path) -> tuple[int, list[str]]:
+    """
+    Mueve los capítulos sueltos a `t1` sin pisar nada: (cuántos se han
+    movido, [los que ya estaban en t1 y se han dejado en la raíz]).
+    """
+    moved, clashes = 0, []
+    for f in loose:
+        target = t1 / f.name
+        if target.exists():
+            clashes.append(f.name)
+            continue
+        os.replace(f, target)  # misma NAS: renombrar, no copiar
+        moved += 1
+    return moved, clashes
 
 def resolve_anime_folder(cfg=None, watch_title="", **kwargs):
     return Library().resolve(cfg or load_config(), watch_title, **kwargs)

@@ -60,19 +60,23 @@ def describe_error(exc: Exception, for_html: bool = True) -> str:
     para HTML salvo `for_html=False` (requester-bot lo escapa él). Los de requests traen la URL entera partida y el
     repr de urllib3, que en Telegram se ven como un enlace roto.
     """
+    text = _network_error_text(exc) or str(exc) or type(exc).__name__
+    return html.escape(text, quote=False) if for_html else text
+
+
+def _network_error_text(exc: Exception) -> str | None:
+    """Un error de red de requests contado con el servidor y sin la URL; None si no es uno de esos."""
     from .util import url_host
     req = getattr(exc, "request", None)
     host = url_host(getattr(req, "url", "") or "") or "el servidor"
     if isinstance(exc, requests.exceptions.SSLError):
-        text = (f"certificado no válido en {host} (¿IP bloqueada por LaLiga?)"
+        return (f"certificado no válido en {host} (¿IP bloqueada por LaLiga?)"
                 if "CERTIFICATE_VERIFY_FAILED" in str(exc) else f"error SSL con {host}")
-    elif isinstance(exc, requests.exceptions.Timeout):
-        text = f"{host} no responde (tiempo de espera agotado)"
-    elif isinstance(exc, requests.exceptions.ConnectionError):
-        text = f"no se pudo conectar con {host}"
-    elif http_status(exc) is not None:
+    if isinstance(exc, requests.exceptions.Timeout):
+        return f"{host} no responde (tiempo de espera agotado)"
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        return f"no se pudo conectar con {host}"
+    if http_status(exc) is not None:
         reason = getattr(exc.response, "reason", "") or ""
-        text = f"{host} respondió HTTP {http_status(exc)} {reason}".strip()
-    else:
-        text = str(exc) or type(exc).__name__
-    return html.escape(text, quote=False) if for_html else text
+        return f"{host} respondió HTTP {http_status(exc)} {reason}".strip()
+    return None

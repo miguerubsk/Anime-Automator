@@ -111,28 +111,39 @@ class DriveMirrorHandler(FailureHandler):
         ctx.item = item.evolve(source=None, via_drive=False, tried_sources=[])
         if not ctx.source_failed:
             return None
-        other = PASTE if current == DRIVE else DRIVE
-        if other not in tried and (other == PASTE or DriveMirror(ctx.cfg).remote_path(item.url)):
-            where = "del Drive" if current == DRIVE else "desde el enlace"
-            log.info("%s %s falló %s (%s): pruebo %s", item.title, item.label, where, ctx.exc,
-                     "el enlace" if other == PASTE else "el Drive")
-            WorkQueue().put(item.evolve(source=other, via_drive=False, tried_sources=sorted(tried)),
-                            priority=0, at="front")
+        if self._try_the_other(ctx, item, current, tried):
             return HELD
         if current == DRIVE and isinstance(ctx.exc, DriveError):
-            # fallaron las dos y la última fue el Drive: reintento más tarde
-            delay = compute_retry_delay_seconds(ctx.item.attempt, ctx.cfg, ctx.exc)
-            log.warning("%s %s: fallaron el enlace y el Drive (%s); reintento en %s",
-                        item.title, item.label, ctx.exc, format_duration(delay))
-            RetryScheduler().schedule(ctx.item, delay / 3600, item.attempt + 1)
-            report(item.key, "episode_retry",
-                   f"⏳ <b>{item.title}</b> {item.label}: fallaron el enlace y el Drive "
-                   f"({describe_error(ctx.exc)}). Se reintentará en ~{format_duration(delay)}.",
-                   notify_if=item.attempt <= 3 or item.attempt % 6 == 0,
-                   attempt=item.attempt, error=describe_error(ctx.exc, for_html=False),
-                   delay=format_duration(delay))
+            self._retry_later(ctx, item)
             return HELD
         return None
+
+    @staticmethod
+    def _try_the_other(ctx, item: WorkItem, current: str, tried: set) -> bool:
+        """Si la otra fuente no se ha probado (y existe), se encola ya con ella."""
+        other = PASTE if current == DRIVE else DRIVE
+        if other in tried or not (other == PASTE or DriveMirror(ctx.cfg).remote_path(item.url)):
+            return False
+        where = "del Drive" if current == DRIVE else "desde el enlace"
+        log.info("%s %s falló %s (%s): pruebo %s", item.title, item.label, where, ctx.exc,
+                 "el enlace" if other == PASTE else "el Drive")
+        WorkQueue().put(item.evolve(source=other, via_drive=False, tried_sources=sorted(tried)),
+                        priority=0, at="front")
+        return True
+
+    @staticmethod
+    def _retry_later(ctx, item: WorkItem):
+        """Fallaron las dos y la última fue el Drive: reintento más tarde."""
+        delay = compute_retry_delay_seconds(ctx.item.attempt, ctx.cfg, ctx.exc)
+        log.warning("%s %s: fallaron el enlace y el Drive (%s); reintento en %s",
+                    item.title, item.label, ctx.exc, format_duration(delay))
+        RetryScheduler().schedule(ctx.item, delay / 3600, item.attempt + 1)
+        report(item.key, "episode_retry",
+               f"⏳ <b>{item.title}</b> {item.label}: fallaron el enlace y el Drive "
+               f"({describe_error(ctx.exc)}). Se reintentará en ~{format_duration(delay)}.",
+               notify_if=item.attempt <= 3 or item.attempt % 6 == 0,
+               attempt=item.attempt, error=describe_error(ctx.exc, for_html=False),
+               delay=format_duration(delay))
 
 
 class TemporaryErrorHandler(FailureHandler):

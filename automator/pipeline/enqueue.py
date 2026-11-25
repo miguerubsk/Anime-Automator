@@ -130,7 +130,7 @@ class Enqueuer:
             folder, _name, _new = Library().resolve(self.cfg, req.watch_title, link_emision=False, create=False)
         except Exception as e:
             return {"status": "folder_resolution_failed", "error": str(e)}
-        have = files.existing_episode_numbers(Path(folder)) | Completed().episodes_of(str(folder))
+        have = self._have(str(folder))
         target = {"folder": str(folder)}
         if all(ep in have or work_key(target, ep) in InProgress() for ep in links):
             return {"status": "nothing_new"}
@@ -155,33 +155,47 @@ class Enqueuer:
                               f"❌ Error resolviendo la carpeta de <b>{watch_title}</b>: {e}", True)
 
         target = {"folder": str(target_folder), "name": anime_name, "page_url": req.watch_url}
-        folder = Path(target["folder"])
-        have = files.existing_episode_numbers(folder) | Completed().episodes_of(target["folder"])
+        have, missing, info = self._series_info(target, watch_title, links)
+        if not missing:
+            (log.debug if quiet else log.info)("Nada nuevo que descargar para %s (ya tengo: %s)",
+                                               watch_title, sorted(have))
+            return {"status": "nothing_new", **info}
+        if req.dry_run:
+            return {**self._dry_run_series(target, missing, info), "new_folder": is_new_folder}
+        return self._queue_series(req, target, watch_title, links, missing, info)
+
+    @staticmethod
+    def _dry_run_series(target: dict, missing: list[int], info: dict) -> dict:
+        """Lo que falta, separando lo que ya se está descargando."""
+        busy = [ep for ep in missing if work_key(target, ep) in InProgress()]
+        pending = [ep for ep in missing if ep not in busy]
+        return {"status": "missing" if pending else "in_progress", **info,
+                "missing": pending, "already_in_progress": busy}
+
+    @staticmethod
+    def _have(folder: str) -> set:
+        """Capítulos que ya hay (en disco o completados en esta ejecución)."""
+        return files.existing_episode_numbers(Path(folder)) | Completed().episodes_of(folder)
+
+    @staticmethod
+    def _series_info(target: dict, watch_title: str, links: dict) -> tuple[set, list[int], dict]:
+        """(capítulos que ya hay, los que faltan, resumen de lo que hay y lo que no)."""
+        have = Enqueuer._have(target["folder"])
         available = sorted(links)
         missing = [ep for ep in available if ep not in have]
-        lower = files.lower_quality_episodes(folder)
-        info = {
-            "title": watch_title, "name": anime_name, "folder": target["folder"],
+        lower = files.lower_quality_episodes(Path(target["folder"]))
+        return have, missing, {
+            "title": watch_title, "name": target["name"], "folder": target["folder"],
             "available": len(available), "have": len(have),
             # de los que faltan, los que ya están en otro formato (se mejoran)
             "upgrade": [ep for ep in missing if ep in lower],
         }
 
-        if not missing:
-            (log.debug if quiet else log.info)("Nada nuevo que descargar para %s (ya tengo: %s)",
-                                               watch_title, sorted(have))
-            return {"status": "nothing_new", **info}
-
-        if req.dry_run:
-            busy = [ep for ep in missing if work_key(target, ep) in InProgress()]
-            pending = [ep for ep in missing if ep not in busy]
-            return {"status": "missing" if pending else "in_progress", **info,
-                    "missing": pending, "already_in_progress": busy, "new_folder": is_new_folder}
-
+    def _queue_series(self, req: EnqueueRequest, target: dict, watch_title: str, links: dict,
+                      missing: list[int], info: dict) -> dict:
+        anime_name = target["name"]
         items = [WorkItem(target, watch_title, ep, links[ep]) for ep in missing]
-        job = JobTracker().new_job(req.job_id, anime_name, watch_title)
-        if job is None and req.watch:
-            job = JobTracker().new_watch_job(req.watch_url, anime_name, watch_title)
+        job = self._series_job(req, anime_name, watch_title)
         observed = bool(job and job.watch_url)
         queued, skipped = self._queue(items, job, req.priority)
         if queued and (not job or observed):
@@ -191,6 +205,14 @@ class Enqueuer:
             log.info("Ya en cola/procesándose para %s: %s", watch_title, skipped)
         return {"status": "queued", **info, "queued": queued, "already_in_progress": skipped,
                 "tracked": bool(job and queued and not observed)}
+
+    @staticmethod
+    def _series_job(req: EnqueueRequest, anime_name: str, watch_title: str):
+        """El trabajo de requester-bot: el de la petición o, si viene del webhook, uno observado."""
+        job = JobTracker().new_job(req.job_id, anime_name, watch_title)
+        if job is None and req.watch:
+            job = JobTracker().new_watch_job(req.watch_url, anime_name, watch_title)
+        return job
 
     @staticmethod
     def _queue(items: list[WorkItem], job, priority: int):
@@ -228,14 +250,15 @@ class Enqueuer:
 
         target = {"folder": str(folder), "name": Path(filename).stem if from_series else title,
                   "movie": True, "filename": filename, "key": f"movie:{dest}", "page_url": req.watch_url}
-        item = WorkItem(target, title, 1, url)
+        return self._queue_movie(req, WorkItem(target, title, 1, url), info)
 
+    def _queue_movie(self, req: EnqueueRequest, item: WorkItem, info: dict) -> dict:
         if req.dry_run:
             busy = item.key in InProgress()
             return {"status": "in_progress" if busy else "missing", **info, "have": 0,
                     "missing": [] if busy else [1]}
 
-        job = JobTracker().new_job(req.job_id, title, title, kind="movie")
+        job = JobTracker().new_job(req.job_id, item.title, item.title, kind="movie")
         queued, skipped = self._queue([item], job, req.priority)
         if not queued:
             return {"status": "queued", **info, "have": 0, "queued": [], "already_in_progress": [1]}

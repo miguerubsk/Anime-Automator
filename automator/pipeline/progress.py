@@ -44,25 +44,33 @@ class BatchProgress(metaclass=Singleton):
         nada que ver.
         """
         with self._lock:
-            total_all = sum(len(e["pending"]) + len(e["done"]) + len(e["failed"]) for e in self._batch.values())
-            pending_lines, finished_lines, finished_keys = [], [], []
+            total_all = sum(self._total(e) for e in self._batch.values())
+            pending_lines, finished_lines = [], []
             for key, e in sorted(self._batch.items(), key=lambda kv: kv[1]["name"].lower()):
-                total_n = len(e["pending"]) + len(e["done"]) + len(e["failed"])
                 if e["pending"]:
-                    extra = f", {len(e['failed'])} fallidos" if e["failed"] else ""
-                    pending_lines.append(f"• {e['name']}: {len(e['done'])}/{total_n} hechos{extra}, "
-                                         f"{len(e['pending'])} pendientes")
+                    pending_lines.append(self._pending_line(e))
                 else:
-                    extra = f" ({len(e['failed'])} fallidos)" if e["failed"] else ""
-                    finished_lines.append(f"• {e['name']}: completado {len(e['done'])}/{total_n}{extra}")
-                    finished_keys.append(key)
-            for key in finished_keys:
-                self._batch.pop(key, None)
+                    finished_lines.append(self._finished_line(e))
+                    self._batch.pop(key)
             if total_all <= 1:
                 return ""
+        return self._render(finished_lines, pending_lines)
 
-        if not pending_lines and not finished_lines:
-            return ""
+    @staticmethod
+    def _total(e: dict) -> int:
+        return len(e["pending"]) + len(e["done"]) + len(e["failed"])
+
+    def _pending_line(self, e: dict) -> str:
+        extra = f", {len(e['failed'])} fallidos" if e["failed"] else ""
+        return f"• {e['name']}: {len(e['done'])}/{self._total(e)} hechos{extra}, {len(e['pending'])} pendientes"
+
+    def _finished_line(self, e: dict) -> str:
+        extra = f" ({len(e['failed'])} fallidos)" if e["failed"] else ""
+        return f"• {e['name']}: completado {len(e['done'])}/{self._total(e)}{extra}"
+
+    @staticmethod
+    def _render(finished_lines: list[str], pending_lines: list[str]) -> str:
+        """Hay al menos una línea: si el total pasa de 1, hay algún anime en el lote."""
         lines = []
         if finished_lines:
             lines += ["✔️ Terminado:", *finished_lines]

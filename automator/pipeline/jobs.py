@@ -189,20 +189,7 @@ class JobTracker(metaclass=Singleton):
     def load(self):
         """Al arrancar: recupera peticiones en curso y avisos sin entregar."""
         try:
-            data = self.store.read({}) or {}
-            jobs = {}
-            for jid, raw in (data.get("jobs") or {}).items():
-                job = Job.from_dict(raw)
-                # tras reiniciar ya no se van a añadir más capítulos a esa
-                # petición: se sella para que el aviso final llegue siempre
-                job.sealed = True
-                jobs[jid] = job
-            with self._lock:
-                for key, jid in data.get("keys", []):
-                    if jid in jobs:
-                        self._by_key[tuple(key)] = jobs[jid]
-            if jobs:
-                log.info("Recuperadas %s peticiones de requester-bot en curso", len(jobs))
+            self._load_jobs()
         except Exception:
             log.exception("No se pudo cargar el estado de las peticiones de requester-bot")
         try:
@@ -211,6 +198,22 @@ class JobTracker(metaclass=Singleton):
                 log.info("Recuperados %s avisos para requester-bot sin entregar", n)
         except Exception:
             log.exception("No se pudo cargar la bandeja de avisos para requester-bot")
+
+    def _load_jobs(self):
+        data = self.store.read({}) or {}
+        jobs = {}
+        for jid, raw in (data.get("jobs") or {}).items():
+            job = Job.from_dict(raw)
+            # tras reiniciar ya no se van a añadir más capítulos a esa
+            # petición: se sella para que el aviso final llegue siempre
+            job.sealed = True
+            jobs[jid] = job
+        with self._lock:
+            for key, jid in data.get("keys", []):
+                if jid in jobs:
+                    self._by_key[tuple(key)] = jobs[jid]
+        if jobs:
+            log.info("Recuperadas %s peticiones de requester-bot en curso", len(jobs))
 
 
 class CallbackSender(BackgroundLoop, metaclass=Singleton):

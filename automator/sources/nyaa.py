@@ -4,6 +4,7 @@ import logging
 import re
 import urllib.parse
 import xml.etree.ElementTree as ET
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -145,6 +146,47 @@ def movie_release_names(title: str) -> set[str]:
     return {k for k in (movie_key(p.strip(" -")) for p in parts) if len(k) >= 3}
 
 
+def is_dub(title: str) -> bool:
+    return any(kw in title.lower() for kw in DUB_EXCLUDE_KEYWORDS)
+
+
+def episode_verdict(title: str, episode: int, season: int) -> str:
+    """¿Vale el release para ese capítulo? 'ok', 'dub', 'other' (otro capítulo) o 'season' (otra temporada)."""
+    if is_dub(title):
+        return "dub"
+    found_episode, found_season = parse_nyaa_release(title)
+    if found_episode != episode:
+        return "other"
+    return "ok" if found_season == season else "season"
+
+
+def item_link(item) -> str | None:
+    """El .torrent de un item del RSS (o, si no lo trae, su enlace)."""
+    enclosure = item.find("enclosure")
+    return enclosure.get("url") if enclosure is not None else item.findtext("link")
+
+
+def search_queries(names, variants) -> list[str]:
+    """Las búsquedas de unos nombres (cada `variants` con "{}" = el nombre), sin repetir nombres."""
+    queries, seen = [], set()
+    for n in names:
+        q = query_text(n)
+        if q and q.lower() not in seen:
+            seen.add(q.lower())
+            queries += [v.format(q) for v in variants]
+    return queries
+
+
+def wanted_keys(names, key) -> set[str]:
+    """Las claves (`key`) de unos nombres, sin las demasiado cortas para distinguir nada."""
+    return {k for k in map(key, names) if len(k) >= 3}
+
+
+def best_of(releases) -> "Release | None":
+    """El de mejor rank (a igualdad, el primero)."""
+    return min(filter(None, releases), key=lambda r: r.rank, default=None)
+
+
 @dataclass
 class Release:
     episode: int
@@ -178,12 +220,26 @@ class NyaaSearch:
         resp.raise_for_status()
         return ET.fromstring(resp.content).findall(".//item")
 
+    def _answers(self, queries):
+        """Los items de cada búsqueda; las que fallan se saltan (con aviso en el log)."""
+        for query in queries:
+            try:
+                yield self._items(query)
+            except Exception as e:
+                log.warning("nyaa.si no responde a %r: %s", query, e)
+
     def subs_ok(self, title: str) -> bool:
         """¿Puede traer subtítulos en español? (si no, no vale la pena bajarlo)."""
         multi = bool(MULTISUB_RE.search(title))
         if ENGLISH_ONLY_RE.search(title) and not multi:
             return False
         return multi or f"[{self.preferred_group}]" in title.lower()
+
+    def _rank(self, title: str, with_subs: bool = True) -> tuple:
+        """Menor = mejor: grupo preferido > subtítulos anunciados (si `with_subs`) > WEB-DL > 1080p."""
+        low = title.lower()
+        subs = (not MULTISUB_RE.search(title),) if with_subs else ()
+        return (self.preferred_group not in low, *subs, not ("web-dl" in low or "webdl" in low), "1080p" not in low)
 
     def catalog(self, names, seasons, max_episode: int | None = None, max_queries: int = 6) -> dict:
         """
@@ -194,26 +250,13 @@ class NyaaSearch:
         subtítulos en español anunciados (o del grupo preferido) y, si se sabe
         cuántos capítulos tiene, dentro de ese número.
         """
-        wanted = {core_key(n) for n in names if len(core_key(n)) >= 3}
+        wanted = wanted_keys(names, core_key)
         found: dict[int, Release] = {}
-        queries, seen = [], set()
-        for n in names:
-            q = query_text(n)
-            if q and q.lower() not in seen:
-                seen.add(q.lower())
-                queries += [f"{q} 1080p", q]
-        for query in queries[:max_queries]:
+        for items in self._answers(search_queries(names, ("{} 1080p", "{}"))[:max_queries]):
+            for rel in filter(None, (self._release(item, wanted, seasons, max_episode) for item in items)):
+                found[rel.episode] = best_of([found.get(rel.episode), rel])
             if max_episode and all(ep in found for ep in range(1, max_episode + 1)):
                 break
-            try:
-                items = self._items(query)
-            except Exception as e:
-                log.warning("nyaa.si no responde a %r: %s", query, e)
-                continue
-            for item in items:
-                rel = self._release(item, wanted, seasons, max_episode)
-                if rel and (rel.episode not in found or rel.rank < found[rel.episode].rank):
-                    found[rel.episode] = rel
         log.info("nyaa.si: %s capítulos para %s (temporadas %s)", len(found), names[:2], sorted(seasons))
         return dict(sorted(found.items()))
 
@@ -223,53 +266,37 @@ class NyaaSearch:
         «Movie»/«Gekijouban»/año), sin número de capítulo, que no sea un lote,
         sin doblaje y con subtítulos en español anunciados (o del grupo preferido).
         """
-        wanted = {movie_key(n) for n in names if len(movie_key(n)) >= 3}
-        best, queries, seen = None, [], set()
-        for n in names:
-            q = query_text(n)
-            if q and q.lower() not in seen:
-                seen.add(q.lower())
-                queries.append(q)
-        for query in queries[:max_queries]:
-            try:
-                items = self._items(query)
-            except Exception as e:
-                log.warning("nyaa.si no responde a %r: %s", query, e)
-                continue
-            for item in items:
-                title = item.findtext("title") or ""
-                low = title.lower()
-                if any(kw in low for kw in DUB_EXCLUDE_KEYWORDS) or not self.subs_ok(title):
-                    continue
-                if BATCH_RE.search(title) or parse_nyaa_release(title)[0] is not None:
-                    continue
-                if not (movie_release_names(title) & wanted):
-                    continue
-                rel = self._build(item, title, 1)
-                if rel and (best is None or rel.rank < best.rank):
-                    best = rel
+        wanted = wanted_keys(names, movie_key)
+        best = None
+        for items in self._answers(search_queries(names, ("{}",))[:max_queries]):
+            best = best_of([best, *(self._movie_release(item, wanted) for item in items)])
             if best and best.preferred:
                 break
         log.info("nyaa.si: película %s para %s", best.title if best else "no encontrada", names[:2])
         return best
 
     def _build(self, item, title: str, episode: int) -> "Release | None":
-        enclosure = item.find("enclosure")
-        link = enclosure.get("url") if enclosure is not None else item.findtext("link")
+        link = item_link(item)
         if not link:
             return None
-        low = title.lower()
         m = re.match(r"\s*\[([^\]]+)\]", title)
-        rank = (self.preferred_group not in low, not MULTISUB_RE.search(title),
-                not ("web-dl" in low or "webdl" in low), "1080p" not in low)
-        return Release(episode, title, link, m.group(1) if m else "", rank)
+        return Release(episode, title, link, m.group(1) if m else "", self._rank(title))
+
+    def _acceptable(self, title: str) -> bool:
+        """Sin doblaje y con subtítulos en español (o del grupo preferido)."""
+        return not is_dub(title) and self.subs_ok(title)
+
+    def _movie_release(self, item, wanted: set) -> Release | None:
+        title = item.findtext("title") or ""
+        if not self._acceptable(title) or BATCH_RE.search(title) or parse_nyaa_release(title)[0] is not None:
+            return None
+        if not (movie_release_names(title) & wanted):
+            return None
+        return self._build(item, title, 1)
 
     def _release(self, item, wanted: set, seasons, max_episode) -> Release | None:
         title = item.findtext("title") or ""
-        low = title.lower()
-        if any(kw in low for kw in DUB_EXCLUDE_KEYWORDS) or not self.subs_ok(title):
-            return None
-        if not (release_names(title) & wanted):
+        if not self._acceptable(title) or not (release_names(title) & wanted):
             return None
         episode, season = parse_nyaa_release(title)
         if not episode or season not in seasons or (max_episode and episode > max_episode):
@@ -279,32 +306,24 @@ class NyaaSearch:
     def search(self, queries, episode: int, expected_season: int):
         """(torrent_url, título) de la mejor coincidencia, o (None, None)."""
         for query in filter(None, queries):
-            candidates = []
-            wrong_season = dub = 0
-            for item in self._items(query):
-                title = item.findtext("title") or ""
-                low = title.lower()
-                if any(kw in low for kw in DUB_EXCLUDE_KEYWORDS):
-                    dub += 1
-                    continue
-                found_episode, found_season = parse_nyaa_release(title)
-                if found_episode != episode:
-                    continue
-                if found_season != expected_season:
-                    wrong_season += 1
-                    continue
-                enclosure = item.find("enclosure")
-                link = enclosure.get("url") if enclosure is not None else item.findtext("link")
-                if not link:
-                    continue
-                candidates.append((self.preferred_group in low,
-                                   "web-dl" in low or "webdl" in low,
-                                   "1080p" in low, title, link))
-            if wrong_season or dub:
-                log.info("nyaa.si: descartados %s de temporada distinta a la %s y %s doblajes (query %r)",
-                         wrong_season, expected_season, dub, query)
-            if candidates:
-                # grupo preferido > WEB-DL > 1080p; el resto en el orden de nyaa
-                candidates.sort(key=lambda c: (not c[0], not c[1], not c[2]))
-                return candidates[0][4], candidates[0][3]
+            match = self._episode_match(query, episode, expected_season)
+            if match:
+                return match
         return None, None
+
+    def _episode_match(self, query: str, episode: int, expected_season: int):
+        """(torrent_url, título) del mejor release del capítulo en una búsqueda, o None."""
+        candidates, verdicts = [], Counter()
+        for item in self._items(query):
+            title = item.findtext("title") or ""
+            verdict = episode_verdict(title, episode, expected_season)
+            verdicts[verdict] += 1
+            link = item_link(item)
+            if verdict == "ok" and link:
+                candidates.append((self._rank(title, with_subs=False), link, title))
+        if verdicts["season"] or verdicts["dub"]:
+            log.info("nyaa.si: descartados %s de temporada distinta a la %s y %s doblajes (query %r)",
+                     verdicts["season"], expected_season, verdicts["dub"], query)
+        # grupo preferido > WEB-DL > 1080p; el resto en el orden de nyaa
+        best = min(candidates, key=lambda c: c[0], default=None)
+        return best and best[1:]

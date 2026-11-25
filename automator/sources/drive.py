@@ -61,9 +61,7 @@ class DriveMirror:
         rel = path[len(INDEX_PREFIX):].strip("/")
         if not rel or ".." in rel.split("/"):
             return None
-        remote, _, folder = base.partition(":")
-        folder = folder.strip("/")
-        return f"{remote}:{folder}/{rel}" if folder else f"{remote}:{rel}"
+        return self.join(base, rel)
 
     # ---------------- del Drive al enlace (para vigilar la unidad) ---------------- #
     def base_for_host(self, host: str) -> str | None:
@@ -82,9 +80,11 @@ class DriveMirror:
         """El enlace del índice para una ruta relativa a la raíz de ese host."""
         return f"https://{host}{INDEX_PREFIX}" + urllib.parse.quote(rel.strip("/"), safe="/()!&'+,;=@~[]")
 
+    def _command(self, *args) -> list[str]:
+        return ["rclone", *args, "--config", self.dcfg.get("rclone_config") or "/config/rclone/rclone.conf"]
+
     def _rclone(self, *args, timeout: float = 120) -> str:
-        cmd = ["rclone", *args, "--config", self.dcfg.get("rclone_config") or "/config/rclone/rclone.conf"]
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        out = subprocess.run(self._command(*args), capture_output=True, text=True, timeout=timeout)
         if out.returncode != 0:
             raise DriveError(f"rclone {args[0]} falló ({out.returncode}): "
                              f"{(out.stderr.strip().splitlines() or ['sin salida'])[-1]}")
@@ -102,24 +102,26 @@ class DriveMirror:
 
     def download(self, remote_path: str, dest: Path, label: str = ""):
         """Baja `remote_path` a `dest`, con el progreso de rclone en el log cada 30 s."""
-        cmd = ["rclone", "copyto", remote_path, str(dest),
-               "--config", self.dcfg.get("rclone_config") or "/config/rclone/rclone.conf",
-               "--drive-acknowledge-abuse", "--retries", "3", "--low-level-retries", "10",
-               "--timeout", "5m", "--stats", "30s", "--stats-one-line", "--stats-log-level", "NOTICE"]
+        cmd = self._command("copyto", remote_path, str(dest),
+                            "--drive-acknowledge-abuse", "--retries", "3", "--low-level-retries", "10",
+                            "--timeout", "5m", "--stats", "30s", "--stats-one-line", "--stats-log-level", "NOTICE")
         log.info("Descargando del Drive %s -> %s", remote_path, dest)
         t0 = time.time()
-        tail: deque[str] = deque(maxlen=5)
         with subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True) as proc:
-            for line in proc.stderr:
-                line = line.strip()
-                if not line:
-                    continue
-                tail.append(line)
-                if "Transferred:" in line or "NOTICE" in line:
-                    log.info("Drive %s: %s", label, line.split(": ", 1)[-1])
+            tail = _follow_progress(proc.stderr, label)
             code = proc.wait()
         if code != 0 or not dest.exists():
             dest.unlink(missing_ok=True)
             raise DriveError(f"rclone falló ({code}): {tail[-1] if tail else 'sin salida'}")
         log.info("Descarga del Drive completada %s: %.2f GB en %.0f min",
                  label, dest.stat().st_size / 1e9, (time.time() - t0) / 60)
+
+
+def _follow_progress(lines, label: str) -> deque[str]:
+    """Lleva al log el progreso de rclone (su stderr) y devuelve las últimas líneas (para el error)."""
+    tail: deque[str] = deque(maxlen=5)
+    for line in filter(None, (raw.strip() for raw in lines)):
+        tail.append(line)
+        if "Transferred:" in line or "NOTICE" in line:
+            log.info("Drive %s: %s", label, line.split(": ", 1)[-1])
+    return tail

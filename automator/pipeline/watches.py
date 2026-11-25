@@ -227,8 +227,7 @@ class DriveWatcher(BackgroundLoop, metaclass=Singleton):
         """
         if w.drive_folder:
             return w.drive_folder
-        if not self._dirs or time.time() - self._dirs_at > self.dirs_ttl_seconds:
-            self._dirs, self._dirs_at = mirror.list_dirs(base), time.time()
+        self._refresh_dirs(mirror, base)
         wanted = name_key(strip_site_suffix(w.title, load_config().get("site_title_suffix", "")))
         by_name = next((d for d in self._dirs if name_key(d) == wanted), None)
         if by_name:
@@ -237,6 +236,15 @@ class DriveWatcher(BackgroundLoop, metaclass=Singleton):
             return w.found_folder
         if not host or time.time() - w.folder_checked_at < self.folder_retry_seconds:
             return None
+        return self._folder_from_paste(w, host)
+
+    def _refresh_dirs(self, mirror: DriveMirror, base: str):
+        """Las carpetas de la raíz de la unidad (se vuelven a listar cada dirs_ttl_seconds)."""
+        if not self._dirs or time.time() - self._dirs_at > self.dirs_ttl_seconds:
+            self._dirs, self._dirs_at = mirror.list_dirs(base), time.time()
+
+    def _folder_from_paste(self, w: Watch, host: str) -> str | None:
+        """La carpeta a la que apuntan los enlaces del paste (se recuerda en el Watch)."""
         w.folder_checked_at = time.time()
         try:
             page = JapanPawPage.fetch(w.watch_url)
@@ -270,7 +278,7 @@ class DriveWatcher(BackgroundLoop, metaclass=Singleton):
         return result
 
     def _poll(self, cfg: dict, w: Watch) -> dict:
-        from .enqueue import EnqueueRequest, Enqueuer, enqueue_from_webhook  # evita un ciclo de importación
+        from .enqueue import EnqueueRequest, Enqueuer  # evita un ciclo de importación
         s = self.settings(cfg)
         mirror = DriveMirror(cfg)
         base = mirror.base_for_host(s["host"])
@@ -289,27 +297,33 @@ class DriveWatcher(BackgroundLoop, metaclass=Singleton):
 
         links, unparsed = self.links_from_files(s["host"], folder, files, TabRanking.from_config(cfg), w.season)
         result = {"status": "nothing_new", "folder": folder, "drive_episodes": sorted(links)}
-
         if links:
             res = Enqueuer(cfg).run_links(EnqueueRequest(w.watch_url, w.title, watch=True), links)
             if res.get("queued"):
                 log.info("Drive: %s tiene capítulos nuevos: %s", w.title, res["queued"])
             result.update(status=res.get("status", "error"), queued=res.get("queued", []))
-
-        # sin "SxxEyy" no se fía la numeración: se lee la ficha del paste, pero
-        # solo mientras el archivo es reciente y sin pasarse (cada page_retry)
-        newest = max((self._mtime(f) for f in unparsed), default=0)
-        now = time.time()
-        if newest and now - newest < s["page_window"] and now - w.page_kicked_at > s["page_retry"]:
-            w.page_kicked_at = now
-            log.info("Drive: archivo nuevo sin SxxEyy en %s; leo la ficha", w.title)
-            res = enqueue_from_webhook(cfg, w.title, w.watch_url)
-            result["page"] = res.get("status")
-            if res.get("queued"):
-                result.update(status="queued", queued=sorted(set(result.get("queued", [])) | set(res["queued"])))
+        self._read_page_if_unnumbered(cfg, s, w, unparsed, result)
         if result["status"] != "queued":
             self._pause_if_already_have(cfg, w, files)
         return result
+
+    def _read_page_if_unnumbered(self, cfg: dict, s: dict, w: Watch, unparsed: list[dict], result: dict):
+        """
+        Sin "SxxEyy" no se fía la numeración: se lee la ficha del paste, pero
+        solo mientras el archivo es reciente y sin pasarse (cada page_retry).
+        Lo que encole se suma a `result`.
+        """
+        from .enqueue import enqueue_from_webhook  # evita un ciclo de importación
+        newest = max((self._mtime(f) for f in unparsed), default=0)
+        now = time.time()
+        if not (newest and now - newest < s["page_window"] and now - w.page_kicked_at > s["page_retry"]):
+            return
+        w.page_kicked_at = now
+        log.info("Drive: archivo nuevo sin SxxEyy en %s; leo la ficha", w.title)
+        res = enqueue_from_webhook(cfg, w.title, w.watch_url)
+        result["page"] = res.get("status")
+        if res.get("queued"):
+            result.update(status="queued", queued=sorted(set(result.get("queued", [])) | set(res["queued"])))
 
     def _pause_if_already_have(self, cfg: dict, w: Watch, files: list[dict]):
         """
@@ -357,28 +371,40 @@ class DriveWatcher(BackgroundLoop, metaclass=Singleton):
         """
         tabs: dict[str, dict] = {}
         unparsed = []
-        seasons = {p[0] for f in files if VIDEO_EXT_RE.search(f.get("Path") or "")
-                   for p in [parse_episode(f.get("Name") or "")] if p}
-        wanted = season if season is not None else max(seasons, default=None)
-        for f in files:
-            path = f.get("Path") or f.get("Name") or ""
-            if not VIDEO_EXT_RE.search(path):
-                continue
-            parsed = parse_episode(f.get("Name") or path)
+        wanted = season if season is not None else DriveWatcher._newest_season(files)
+        for f, path, parsed in DriveWatcher._videos(files):
             if parsed is None:
                 unparsed.append(f)
-                continue
-            if parsed[0] != wanted:
-                continue
-            tab = path.split("/")[0] if "/" in path else ""
-            if tab not in tabs:
-                group, source, resolution = parse_tab_label(tab)
-                tabs[tab] = {"group": group, "source": source, "resolution": resolution, "links": {}}
-            tabs[tab]["links"][parsed[1]] = DriveMirror.url_for(host, f"{folder}/{path}")
+            elif parsed[0] == wanted:
+                DriveWatcher._tab_of(tabs, path)[parsed[1]] = DriveMirror.url_for(host, f"{folder}/{path}")
         merged = {}
         for t in sorted(tabs.values(), key=ranking.key, reverse=True):
             merged.update(t["links"])
         return merged, unparsed
+
+    @staticmethod
+    def _videos(files: list[dict]):
+        """(archivo, ruta, (temporada, capítulo) o None) de cada vídeo."""
+        for f in files:
+            path = f.get("Path") or f.get("Name") or ""
+            if VIDEO_EXT_RE.search(path):
+                yield f, path, parse_episode(f.get("Name") or path)
+
+    @staticmethod
+    def _newest_season(files: list[dict]) -> int | None:
+        """La temporada más alta de los vídeos con SxxEyy (None si no hay ninguno)."""
+        seasons = {p[0] for f in files if VIDEO_EXT_RE.search(f.get("Path") or "")
+                   for p in [parse_episode(f.get("Name") or "")] if p}
+        return max(seasons, default=None)
+
+    @staticmethod
+    def _tab_of(tabs: dict[str, dict], path: str) -> dict:
+        """Los enlaces de la pestaña (subcarpeta) de ese archivo, creándola si hace falta."""
+        tab = path.split("/")[0] if "/" in path else ""
+        if tab not in tabs:
+            group, source, resolution = parse_tab_label(tab)
+            tabs[tab] = {"group": group, "source": source, "resolution": resolution, "links": {}}
+        return tabs[tab]["links"]
 
     # ---------------- para la API ----------------
     def overview(self, cfg: dict) -> list[dict]:
