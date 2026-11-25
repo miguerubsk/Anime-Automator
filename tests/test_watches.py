@@ -179,3 +179,91 @@ class WatchesApiTest(AutomatorTestCase):
                        headers={"X-Callback-Secret": "s3cr3t"})
         self.assertEqual(bad_tz.status_code, 400)
         self.assertEqual(json.loads((self.root / "tmp" / "watches.json").read_text())["watches"][0]["title"], "X")
+
+
+class WeeklyPauseTest(AutomatorTestCase):
+    """Con el capítulo de la semana ya guardado, no se vuelve a mirar hasta la siguiente ventana."""
+
+    def setUp(self):
+        super().setUp()
+        from automator.pipeline.watches import WatchRegistry
+        self.folder = self.root / "Anime" / "Serie"
+        self.folder.mkdir(parents=True, exist_ok=True)
+        for ep in (1, 2, 3):
+            (self.folder / f"{ep:02d}.mkv").write_bytes(b"x")
+        self.w = WatchRegistry().replace([{"watch_url": "https://paste.japan-paw.net/?v=5", "title": "Serie",
+                                           "schedule": {"weekday": 6, "start_min": 17 * 60, "hours": 48}}])[0]
+
+    def done(self, ep, when):
+        from datetime import datetime
+        from automator.pipeline.watches import Watch, WatchRegistry
+        with mock.patch.object(Watch, "now", return_value=when):
+            WatchRegistry().episode_done(self.w.watch_url, str(self.folder), ep)
+        return datetime.fromtimestamp(self.w.done_until) if self.w.done_until else None
+
+    def test_pauses_until_window_end(self):
+        from datetime import datetime
+        # domingo 22/11/2026 a las 20:30, dentro de la ventana (dom 17:00 + 48 h)
+        self.assertEqual(self.done(3, datetime(2026, 11, 22, 20, 30)), datetime(2026, 11, 24, 17, 0))
+
+    def test_old_episode_or_outside_window_does_not_pause(self):
+        from datetime import datetime
+        self.assertIsNone(self.done(2, datetime(2026, 11, 22, 20, 30)))   # atrasado: falta el de la semana
+        self.assertIsNone(self.done(3, datetime(2026, 11, 26, 12, 0)))    # jueves: fuera de la ventana
+
+    def test_unknown_anime_is_ignored(self):
+        from automator.pipeline.watches import WatchRegistry
+        WatchRegistry().episode_done("https://otra", str(self.folder), 3)  # no lanza
+
+    def test_paused_watch_is_skipped_by_the_loop(self):
+        import time
+        from automator.pipeline.watches import DriveWatcher, WatchRegistry
+        self.w.done_until = time.time() + 3600
+        WatchRegistry().save()
+        cfg = {**self.cfg, **CFG}
+        with mock.patch("automator.pipeline.watches.load_config", return_value=cfg), \
+             mock.patch.object(DriveWatcher, "poll") as poll, \
+             mock.patch("automator.pipeline.watches.time.sleep"):
+            DriveWatcher().step()
+        poll.assert_not_called()
+
+    def test_saved_episode_from_worker_pauses(self):
+        from automator.pipeline.watches import WatchRegistry
+        from automator.pipeline.worker import Finisher
+        item = self.item("Serie", 3, page_url=self.w.watch_url)
+        with mock.patch.object(WatchRegistry, "episode_done") as done:
+            Finisher().finish(self.cfg, item, dest=self.folder / "03.mkv")
+        done.assert_called_once_with(self.w.watch_url, item.folder, 3)
+
+    def test_poll_pauses_if_week_episode_already_saved(self):
+        from datetime import datetime
+        from automator.pipeline import watches
+        from automator.pipeline.watches import DriveWatcher, Watch
+        cfg = {**self.cfg, **CFG}
+        sunday_night = datetime(2026, 11, 22, 21, 0)
+        import os
+        os.utime(self.folder / "03.mkv", (datetime(2026, 11, 22, 20, 0).timestamp(),) * 2)  # guardado después
+        files = [f("[Grupo][Web 1080p]/Serie - 03.mkv", "2026-11-22T19:30:00+01:00")]  # subido en la ventana, sin SxxEyy
+        with mock.patch.object(Watch, "now", return_value=sunday_night), \
+             mock.patch.object(watches.DriveMirror, "list_dirs", return_value=["Serie"]), \
+             mock.patch.object(watches.DriveMirror, "list_recent_files", return_value=files), \
+             mock.patch("automator.pipeline.enqueue.enqueue_from_webhook", return_value={"status": "nothing_new"}), \
+             mock.patch("automator.pipeline.watches.load_config", return_value=cfg):
+            DriveWatcher().poll(cfg, self.w)
+        self.assertEqual(datetime.fromtimestamp(self.w.done_until), datetime(2026, 11, 24, 17, 0))
+
+    def test_poll_does_not_pause_if_saved_before_upload(self):
+        import os
+        from datetime import datetime
+        from automator.pipeline import watches
+        from automator.pipeline.watches import DriveWatcher, Watch
+        cfg = {**self.cfg, **CFG}
+        os.utime(self.folder / "03.mkv", (datetime(2026, 11, 20, 12, 0).timestamp(),) * 2)  # el de la semana pasada
+        files = [f("[Grupo][Web 1080p]/Serie - 04.mkv", "2026-11-22T19:30:00+01:00")]
+        with mock.patch.object(Watch, "now", return_value=datetime(2026, 11, 22, 21, 0)), \
+             mock.patch.object(watches.DriveMirror, "list_dirs", return_value=["Serie"]), \
+             mock.patch.object(watches.DriveMirror, "list_recent_files", return_value=files), \
+             mock.patch("automator.pipeline.enqueue.enqueue_from_webhook", return_value={"status": "nothing_new"}), \
+             mock.patch("automator.pipeline.watches.load_config", return_value=cfg):
+            DriveWatcher().poll(cfg, self.w)
+        self.assertEqual(self.w.done_until, 0.0)

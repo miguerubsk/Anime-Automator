@@ -13,6 +13,10 @@ anime en la unidad de emisión:
 - archivos sin "SxxEyy" (numeración absoluta, "Berserk S2 - 16" = cap. 4):
   no se fía la numeración; se lee la ficha del paste, como con el webhook.
 
+Cuando el capítulo de la semana ya está guardado (llegue por donde llegue:
+Drive, ficha, webhook o torrent), se deja de mirar ese anime hasta su
+siguiente ventana (sin ventana: 6 días).
+
 change-detection sigue funcionando igual (webhook): los dos caminos llegan
 al mismo Enqueuer, que no encola dos veces lo mismo.
 """
@@ -23,13 +27,15 @@ import threading
 import time
 import urllib.parse
 from dataclasses import asdict, dataclass, field, fields
-from datetime import datetime
+from datetime import datetime, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from ..core.config import load_config
 from ..core.persistence import JsonStore
 from ..core.singleton import Singleton
 from ..core.background import BackgroundLoop
+from ..library.files import existing_episode_numbers
 from ..library.naming import name_key, strip_site_suffix
 from ..sources.drive import INDEX_PREFIX, DriveError, DriveMirror
 from ..sources.japanpaw import VIDEO_EXT_RE, JapanPawPage, TabRanking, parse_tab_label
@@ -37,6 +43,7 @@ from ..sources.japanpaw import VIDEO_EXT_RE, JapanPawPage, TabRanking, parse_tab
 log = logging.getLogger("anime-automator")
 
 SEASON_EPISODE_RE = re.compile(r"(?<![a-z0-9])S(\d{1,2})\s?E(\d{1,4})(?!\d)", re.IGNORECASE)
+NO_WINDOW_PAUSE = timedelta(days=6)
 WEEKDAYS = ("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo")
 
 
@@ -61,6 +68,7 @@ class Watch:
     last_poll: float = 0.0
     last_status: str = ""
     page_kicked_at: float = 0.0
+    done_until: float = 0.0        # capítulo de la semana ya guardado: no se mira hasta entonces
 
     @classmethod
     def from_dict(cls, d: dict) -> "Watch":
@@ -87,6 +95,15 @@ class Watch:
         start = int(self.schedule["weekday"]) % 7 * 24 * 60 + int(self.schedule.get("start_min") or 0)
         minute = when.weekday() * 24 * 60 + when.hour * 60 + when.minute
         return (minute - start) % week < int(self.schedule["hours"]) * 60
+
+    def window_end(self, when: datetime) -> datetime | None:
+        """Cuándo acaba la ventana en la que está `when` (None si está fuera o no hay ventana)."""
+        if not self.limited or not self.active_at(when):
+            return None
+        start = int(self.schedule["weekday"]) % 7 * 24 * 60 + int(self.schedule.get("start_min") or 0)
+        minute = when.weekday() * 24 * 60 + when.hour * 60 + when.minute
+        elapsed = (minute - start) % (7 * 24 * 60)
+        return when.replace(second=0, microsecond=0) + timedelta(minutes=int(self.schedule["hours"]) * 60 - elapsed)
 
     def describe(self) -> str:
         if not self.limited:
@@ -116,6 +133,7 @@ class WatchRegistry(metaclass=Singleton):
             old = self._watches.get(url)
             if old:
                 w.last_poll, w.last_status, w.page_kicked_at = old.last_poll, old.last_status, old.page_kicked_at
+                w.done_until = old.done_until
                 w.found_folder, w.folder_checked_at = old.found_folder, old.folder_checked_at
             new[url] = w
         with self._lock:
@@ -134,6 +152,31 @@ class WatchRegistry(metaclass=Singleton):
     def save(self):
         with self._lock:
             self._save_locked()
+
+    def episode_done(self, page_url: str | None, folder: str, episode: int):
+        """
+        Se ha guardado un capítulo: si es de un anime vigilado y es el último que
+        hay (no uno atrasado), ya está el de esta semana y se deja de mirar
+        hasta que acabe la ventana actual (sin ventana, NO_WINDOW_PAUSE).
+        """
+        w = self.get(page_url or "")
+        if w is None:
+            return
+        have = existing_episode_numbers(Path(folder))
+        if have and episode < max(have):
+            return
+        now = w.now()
+        if w.limited:
+            end = w.window_end(now)
+            if end is None:  # llegó fuera de la ventana: no hay nada que pausar
+                return
+        else:
+            end = now + NO_WINDOW_PAUSE
+        with self._lock:
+            w.done_until = end.timestamp()
+            self._save_locked()
+        log.info("Drive: %s ya tiene el capítulo %s de esta semana; no se vuelve a mirar hasta %s",
+                 w.title, episode, end.strftime("%d/%m %H:%M"))
 
     def _save_locked(self):
         self.store.save({"watches": [asdict(w) for w in self._watches.values()]})
@@ -166,7 +209,7 @@ class DriveWatcher(BackgroundLoop, metaclass=Singleton):
         s = self.settings(cfg)
         if s["enabled"]:
             for w in WatchRegistry().all():
-                if w.active_at(w.now()):
+                if w.active_at(w.now()) and time.time() >= w.done_until:
                     try:
                         self.poll(cfg, w)
                     except Exception:
@@ -264,7 +307,37 @@ class DriveWatcher(BackgroundLoop, metaclass=Singleton):
             result["page"] = res.get("status")
             if res.get("queued"):
                 result.update(status="queued", queued=sorted(set(result.get("queued", [])) | set(res["queued"])))
+        if result["status"] != "queued":
+            self._pause_if_already_have(cfg, w, files)
         return result
+
+    def _pause_if_already_have(self, cfg: dict, w: Watch, files: list[dict]):
+        """
+        Nada nuevo: si lo último subido al Drive es de esta ventana y el último
+        capítulo de la biblioteca se guardó DESPUÉS (se bajó por el webhook, la
+        ficha o antes de reiniciar), el de esta semana ya está: a pausar. No
+        depende de la numeración del Drive (vale también sin SxxEyy).
+        """
+        from ..library.files import episode_files
+        from ..library.folders import Library
+        end = w.window_end(w.now()) if w.limited else None
+        if end is None:
+            return
+        start = end - timedelta(hours=int(w.schedule["hours"]))
+        uploaded = max((self._mtime(f) for f in files if VIDEO_EXT_RE.search(f.get("Path") or "")), default=0)
+        if uploaded < start.timestamp():
+            return
+        try:
+            folder, _name, _new = Library().resolve(cfg, w.title, link_emision=False, create=False)
+            eps = episode_files(Path(folder))
+            if not eps:
+                return
+            latest = max(eps)
+            saved = max(f.stat().st_mtime for f in eps[latest])
+        except Exception:
+            return
+        if saved >= uploaded:
+            WatchRegistry().episode_done(w.watch_url, str(folder), latest)
 
     @staticmethod
     def _mtime(f: dict) -> float:
@@ -309,5 +382,8 @@ class DriveWatcher(BackgroundLoop, metaclass=Singleton):
 
     # ---------------- para la API ----------------
     def overview(self, cfg: dict) -> list[dict]:
-        return [{**asdict(w), "window": w.describe(), "active_now": w.active_at(w.now())}
+        now = time.time()
+        return [{**asdict(w), "window": w.describe(), "active_now": w.active_at(w.now()) and now >= w.done_until,
+                 "paused_until": datetime.fromtimestamp(w.done_until).isoformat(timespec="minutes")
+                 if w.done_until > now else None}
                 for w in WatchRegistry().all()]

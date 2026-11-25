@@ -18,6 +18,7 @@ from .processing import EpisodeProcessor, TorrentFileSource
 from .progress import BatchProgress
 from .registry import Completed, InProgress
 from .reporting import report
+from .watches import WatchRegistry
 
 log = logging.getLogger("anime-automator")
 
@@ -202,6 +203,8 @@ class TorrentTracker(BackgroundLoop, metaclass=Singleton):
                source="nyaa")
         self.mark_processed(tracked)
         Completed().add(item.key)
+        if not item.is_movie:
+            WatchRegistry().episode_done(item.target.get("page_url"), item.folder, item.episode)
         InProgress().discard(item.key)
         return True
 

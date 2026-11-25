@@ -26,6 +26,7 @@ from .progress import BatchProgress
 from .registry import Completed, InProgress
 from .reporting import report
 from .retries import RetryScheduler
+from .watches import WatchRegistry
 from .work_queue import WorkQueue
 
 log = logging.getLogger("anime-automator")
@@ -56,6 +57,8 @@ class Finisher(metaclass=Singleton):
     def _success(item: WorkItem, dest: Path):
         RetryScheduler().wake(item.url, item.target.get("folder", ""), f"{item.title} {item.label} descargado")
         Completed().add(item.key)
+        if not item.is_movie:
+            WatchRegistry().episode_done(item.target.get("page_url"), item.folder, item.episode)
         BatchProgress().done(item.folder, item.episode)
         report(item.key, "episode_done",
                lambda: f"✅ <b>{item.title}</b> - {item.label} procesado y guardado en:\n{dest}"
