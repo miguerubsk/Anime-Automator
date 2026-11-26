@@ -22,8 +22,6 @@ from .work_queue import WorkQueue
 
 log = logging.getLogger("anime-automator")
 
-CANCEL_REASON = "eliminado de la cola por el administrador"
-
 
 # ------------------------------------------------------------------ #
 # Foto de la cola
@@ -92,17 +90,17 @@ def queue_overview() -> QueueOverview:
     return QueueOverview(current, all_paused, groups, torrents)
 
 
-def cancel_episodes(keys, reason: str = CANCEL_REASON) -> int:
+def cancel_episodes(keys) -> int:
     """Quita de la cola (y de los reintentos programados) esos capítulos.
-    Si pertenecían a una petición de requester-bot, se le avisa como fallidos
-    para que la petición se cierre y el usuario reciba su resumen."""
+    Si pertenecían a una petición de requester-bot, se le avisa en un solo
+    mensaje por petición (y si con eso se cierra, en su resumen)."""
     keys = set(keys)
     cancelled = WorkQueue().remove(keys) + RetryScheduler().remove(keys)
     for item in cancelled:
         InProgress().discard(item.key)
         PendingStore().remove(item)
         BatchProgress().cancelled(item.folder, item.episode)
-        JobTracker().event(item.key, "episode_failed", error=reason)
+    JobTracker().cancel([item.key for item in cancelled])
     PendingStore().persist()
     if cancelled:
         log.info("Cancelados desde el bot de administración: %s", [(i.name, i.episode) for i in cancelled])

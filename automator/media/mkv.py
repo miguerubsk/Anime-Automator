@@ -10,6 +10,8 @@ from .tracks import TrackSelection
 
 log = logging.getLogger("anime-automator")
 
+MKVMERGE_WARNINGS = 1   # código de salida de mkvmerge: terminó, pero con avisos
+
 
 def mkv_track_info(path: Path) -> dict:
     out = subprocess.run(["mkvmerge", "-J", str(path)], capture_output=True, text=True, check=True)
@@ -73,4 +75,11 @@ class Remuxer:
         self.validate(selection)
         cmd = self.command(src, dst, selection)
         log.info("Ejecutando: %s", " ".join(cmd))
-        subprocess.run(cmd, check=True)
+        done = subprocess.run(cmd, capture_output=True, text=True)
+        # 0 = bien, 1 = bien pero con avisos (p. ej. unos bytes de audio
+        # corruptos que se saltan: el archivo vale), 2 = error de verdad
+        if done.returncode > MKVMERGE_WARNINGS:
+            log.error("mkvmerge falló:\n%s", done.stdout + done.stderr)
+            raise subprocess.CalledProcessError(done.returncode, cmd, done.stdout, done.stderr)
+        if done.returncode == MKVMERGE_WARNINGS:
+            log.warning("mkvmerge terminó con avisos:\n%s", done.stdout + done.stderr)

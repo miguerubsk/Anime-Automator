@@ -120,6 +120,38 @@ class ManagementTest(AutomatorTestCase):
         self.assertEqual(WorkQueue().view()[0], [])
         self.assertEqual(RetryScheduler().entries(), [])
         self.assertEqual(InProgress().snapshot(), set())
-        events = [(p["event"], p.get("episode")) for p in tracker.outbox._items]
-        self.assertEqual(events[-1], ("job_complete", None))
-        self.assertIn(("episode_failed", 1), events)
+        events = [p for p in tracker.outbox._items]
+        # todo lo del encargo en un solo aviso: el final, con lo quitado aparte de lo fallido
+        self.assertEqual([p["event"] for p in events], ["job_complete"])
+        self.assertEqual((events[0]["cancelled"], events[0]["failed"], events[0]["done"]), ([1, 2], [], []))
+
+    def test_cancelling_part_of_an_order_is_one_notice(self):
+        from automator.pipeline.jobs import JobTracker
+        from automator.pipeline.management import cancel_episodes
+        from automator.pipeline.pending import PendingStore
+        from automator.pipeline.work_queue import WorkQueue
+        import os
+        os.environ["REQUESTER_CALLBACK_URL"] = "http://requester.invalid/events"
+        PendingStore()
+        tracker = JobTracker()
+        job = tracker.new_job(8, "Dos", "Dos")
+        for ep in range(1, 7):
+            tracker.attach(job, self.item("Dos", ep).key)
+            WorkQueue().put(self.item("Dos", ep))
+        tracker.seal(job)
+        tracker.event(self.item("Dos", 1).key, "episode_done")
+        tracker.event(self.item("Dos", 2).key, "episode_failed", error="x")
+        tracker.outbox._items.clear()
+
+        cancel_episodes([self.item("Dos", ep).key for ep in (3, 4, 5)])
+        events = list(tracker.outbox._items)
+        self.assertEqual([(p["event"], p.get("episodes")) for p in events], [("episodes_cancelled", [3, 4, 5])])
+        self.assertEqual((events[0]["total"], events[0]["done"], events[0]["failed"]), (6, 1, 1))
+
+        tracker.event(self.item("Dos", 6).key, "episode_done")
+        final = tracker.outbox._items[-1]
+        self.assertEqual((final["event"], final["done"], final["failed"], final["cancelled"], final["total"]),
+                         ("job_complete", [1, 6], [2], [3, 4, 5], 6))
+        before = len(tracker.outbox._items)
+        tracker.seal(job)                                  # ya terminado: no se vuelve a avisar
+        self.assertEqual(len(tracker.outbox._items), before)

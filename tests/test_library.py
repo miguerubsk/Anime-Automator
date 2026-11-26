@@ -55,6 +55,17 @@ class ResolveTest(LibraryTestCase):
         self.library().resolve(self.cfg, "Override Title" + SUFFIX)
         self.assertEqual(self.links, [("Fijada", self.anime / "Fijada")])
 
+    def test_override_matches_without_suffix_or_punctuation(self):
+        """La web y el paste escriben distinto el mismo título: «Fate/kaleid liner Prisma☆Illya»."""
+        self.cfg["animes"].append({"watch_title": "Fate/kaleid liner Prisma☆Illya",
+                                   "folder": str(self.anime / "Fate" / "Kaleid" / "Liner Prisma Illya")})
+        folder, name, new = self.resolve("Fate kaleid liner Prisma Illya", link_emision=False)
+        self.assertEqual((folder, new), (self.anime / "Fate" / "Kaleid" / "Liner Prisma Illya", False))
+        folder, _, _ = self.library().resolve(self.cfg, "Override Title", link_emision=False)
+        self.assertEqual(folder, self.anime / "Fijada" / "Temporada 2")
+        folder, _, _ = self.resolve("Fate kaleid liner Prisma Illya 2wei!", link_emision=False, create=False)
+        self.assertEqual(folder, self.anime / "Fate kaleid liner Prisma Illya 2wei!")   # otra temporada: no
+
     def test_new_series_is_created_in_the_root(self):
         folder, name, new = self.resolve("Nueva")
         self.assertEqual((folder, name, new), (self.anime / "Nueva", "Nueva", True))
@@ -397,6 +408,19 @@ class MovieLibraryTest(LibraryTestCase):
         self.assertIsNone(m.folder_named("Películas"))
         self.assertIsNone(m.folder_named("Otra Serie"))
         self.assertIsNone(m.folder_named("K"))
+
+    def test_destination_from_an_override_with_its_file_name(self):
+        """Un caso especial puede fijar también el nombre del archivo (el que ya tiene la biblioteca)."""
+        kizu = self.mk("Monogatari series", "1.1 Kizumonogatari I - Tekketsu-hen")
+        self.cfg["animes"] += [
+            {"watch_title": "Kizumonogatari I: Tekketsu-hen", "folder": str(kizu),
+             "file": "Kizumonogatari I Tekketsu-hen.mkv"},
+            {"watch_title": "Fate/Grand Order: First Order", "folder": str(self.anime / "Fate" / "Grand Order")}]
+        m = self.movies()
+        self.assertEqual(m.destination("Kizumonogatari I: Tekketsu-hen"),
+                         (kizu, "Kizumonogatari I Tekketsu-hen.mkv", True))
+        self.assertEqual(m.destination("Fate/Grand Order: First Order"),
+                         (self.anime / "Fate" / "Grand Order", "Película - First Order.mkv", True))
 
     def test_destination(self):
         self.mk("Overlord")

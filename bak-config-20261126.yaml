@@ -1,0 +1,187 @@
+# ============================================================
+# Configuración del automatizador de anime
+# ============================================================
+
+# Carpeta temporal donde se descargan los mkv antes de procesarlos
+tmp_dir: "/data/tmp"
+
+# Chrome headless propio (ver docker-compose.yml, servicio browser-sockpuppet-chrome),
+# autocontenido en este mismo stack, sin depender de la red Docker del Pi.
+sockpuppet_browser_url: "ws://browser-sockpuppet-chrome:3000"
+
+# Raíces de tu biblioteca (rutas dentro del contenedor == rutas del host,
+# montaje directo)
+anime_root: "/nuevo-pool/Anime"
+# share Anime_Emisión de la NAS (NO /nuevo-pool/Emision: esa era una carpeta
+# local del minipc que nadie veía)
+emision_root: "/nuevo-pool/Anime_Emisión"
+
+# Por SMB la NAS no permite crear symlinks, así que los enlaces de emisión se
+# crean en la propia NAS por SSH. La clave pública de ./ssh/id_ed25519.pub
+# tiene que estar en ~/.ssh/authorized_keys de ese usuario en la NAS.
+nas_ssh:
+  host: "192.168.1.90"
+  port: 22
+  user: "miguerubsk"
+  key_file: "/config/ssh/id_ed25519"
+  # ruta del share Anime_Emisión vista DESDE LA NAS (por defecto, la misma
+  # que emision_root; cámbiala si en la NAS el share vive en otra ruta)
+  emision_path: "/nuevo-pool/Emision"
+
+# Películas originales (las de una serie que ya está en la biblioteca van a la
+# carpeta de esa serie como "Película NN.mkv" / "Película - Subtítulo.mkv")
+movies_dirname: "PELICULAS"   # dentro de anime_root
+
+# Cómo se muestran las rutas en los avisos (Telegram, bot de administración,
+# requester-bot): en vez de la ruta interna del servidor, la que ven los
+# usuarios por SMB. Lista de [prefijo interno, cómo se muestra]; se aplica el
+# primero que coincida, así que los más concretos van primero. Las dos
+# primeras son rutas de la propia NAS (las que reporta Transmission), cuyo
+# share se llama distinto que la carpeta.
+display_paths:
+  - ["/nuevo-pool/Emision/", "Anime_Emisión/"]
+  - ["/nuevo-pool/PeliculasYSeries/", "PeliculasSeries/"]
+  - ["/nuevo-pool/", ""]      # /nuevo-pool/Anime/X/07.mkv -> Anime/X/07.mkv
+
+# Archivo que SOLO existe en la NAS real (créalo tú una vez con
+# `touch /mnt/NAS/.nas_mount_ok` desde el host, no desde el contenedor).
+# Si no está presente, asumimos que el montaje ha fallado y el servicio
+# aborta sin crear ni escribir nada, en vez de crear carpetas nuevas en el
+# disco local del host por error.
+nas_sentinel_file: "/nuevo-pool/torrent-complete/.nas_mount_ok"
+
+# Sufijo que change-detection siempre añade al watch_title de esta web;
+# se elimina antes de derivar el nombre de carpeta.
+site_title_suffix: "- Japan-Paw! Descarga Calidad"
+
+# Preferencias de selección de versión (grupo/calidad) dentro de la página
+# Orden de prioridad al elegir entre pestañas disponibles:
+#   1. Resolución más alta disponible (1080p > 720p > ...)
+#   2. Tipo de fuente: DL > Web (si existen ambas para la misma resolución)
+#   3. Grupo preferido (si existe, se usa; si no, se coge el primero disponible)
+preferred_group: "Erai-raws"
+
+# Preferencias de idioma
+audio_languages:
+  - jpn                # japonés, siempre que exista
+  - spa_espana         # español España, si existe
+  - spa_latino         # español latino, SOLO si no hay España (fallback)
+
+audio_default: jpn      # pista que se marca como predeterminada
+
+subtitle_priority:      # se conserva solo la primera que se encuentre
+  - spa_espana
+  - spa_latino
+  - eng
+
+# Palabras clave (case-insensitive) para distinguir España vs Latino
+# cuando el idioma de la pista es genérico "spa"/"es" y no hay forma de
+# saberlo por el código ISO
+spain_keywords: ["españa", "espana", "castellano", "es-es", "spain", "spa"]
+latino_keywords: ["latino", "latin", "es-419", "hispanoamérica", "hispanoamerica", "latin"]
+
+# Telegram (reutiliza el mismo bot/chat que ya usas en change-detection)
+telegram:
+  bot_token: "${TELEGRAM_BOT_TOKEN}"
+  chat_id: "${TELEGRAM_CHAT_ID}"
+
+# ============================================================
+# Reintento diferido: si falla la descarga por un error TEMPORAL (problema
+# de conexión, certificado SSL, o un código HTTP que indica un fallo del
+# lado del servidor como 502/503/504/429), se reintenta más tarde en vez de
+# ir directo al fallback de nyaa.si — sin límite de intentos, mientras el
+# error siga siendo de tipo temporal. La espera entre intentos crece
+# exponencialmente (empieza rápido, se espacia si el problema persiste),
+# hasta un máximo. Solo se cae a nyaa.si ante un error que sabemos que no se
+# va a arreglar solo (404, etc.) o cualquier otro fallo no relacionado con
+# la conexión (audio/subtítulos inválidos...).
+# ============================================================
+download_retry:
+  initial_delay_minutes: 5     # espera antes del primer reintento
+  backoff_multiplier: 2        # cada reintento espera el doble que el anterior
+  max_delay_hours: 6           # tope de espera entre reintentos, no crece más allá
+  # 403 = cupo del servidor de descarga agotado. Cada capítulo espera por su
+  # cuenta (30 min, 1 h, 2 h... hasta 18 h, con ±25 % al azar para que no
+  # coincidan) y en cuanto UNO se descarga bien, todos los que esperaban del
+  # mismo servidor se prueban al momento.
+  quota_status_codes: [403]
+  quota_initial_delay_minutes: 30
+  quota_max_delay_hours: 18
+  jitter: 0.25
+
+# ============================================================
+# La unidad compartida de Google Drive de Japan-Paw (por rclone, con tu
+# cuenta). Los enlaces del paste son de un índice de esa misma unidad, que
+# tiene su propio cupo ("403. Cuota Excedida") y depende de Cloudflare. Cada
+# capítulo se baja de una fuente y, si falla, de la otra. Ojo: el Drive
+# también tiene cupo, pero por archivo (downloadQuotaExceeded).
+# hosts: cada host del índice -> el remote de rclone y su carpeta raíz.
+# ============================================================
+drive_mirror:
+  enabled: true
+  prefer: true                 # primero el Drive; el enlace del paste, de respaldo
+  rclone_config: "/config/rclone/rclone.conf"
+  hosts:
+    anime.craftervault.com: "japanpaw:Anime"
+    emision.craftervault.com: "japanpaw-emision:"
+
+# ============================================================
+# Vigilar la unidad de emisión del Drive (más rápido que change-detection y
+# sin Chrome). Qué animes y en qué ventana (la misma que en change-detection)
+# los manda Kuro (requester-bot) con PUT /watches. Los archivos con SxxEyy se
+# encolan directamente; los demás, leyendo la ficha.
+# change-detection sigue funcionando igual en paralelo.
+# ============================================================
+drive_watch:
+  enabled: true
+  host: "emision.craftervault.com"   # qué unidad de drive_mirror.hosts se vigila
+  interval_minutes: 10
+  max_age_days: 21                   # archivos más viejos no se miran
+
+# ============================================================
+# Bloqueo de IPs de LaLiga (en partido, los operadores bloquean IPs de
+# Cloudflare y la descarga ve un certificado falso). Primero se busca otra IP
+# del mismo servidor por DNS cifrado; si no hay ninguna libre, se descarga
+# por este proxy (vacío = no se usa). Con "socks5h" el DNS lo resuelve Tor.
+# ============================================================
+blocked_ip_bypass:
+  proxy: "socks5h://192.168.1.91:9050"
+
+# ============================================================
+# Fallback: si el enlace de japan-paw da error al descargarlo (404, etc.),
+# buscar el mismo capítulo en nyaa.si y descargarlo por torrent vía
+# Transmission en vez de fallar directamente.
+# ============================================================
+nyaa_fallback:
+  enabled: true
+  base_url: "https://nyaa.si"
+  category: "1_2"        # Anime - English-translated
+  notify_on_use: true    # avisar por Telegram cada vez que se use el fallback
+
+transmission:
+  host: "192.168.1.90"
+  port: 9091
+  username: "${TRANSMISSION_USER}"
+  password: "${TRANSMISSION_PASS}"
+  # No se fuerza download_dir ni seedRatioLimit al añadir el torrent:
+  # Transmission ya tiene su propia carpeta de destino y su propio ratio de
+  # siembra (6) configurados por defecto. La ruta real de cada descarga se
+  # consulta por RPC (torrent.download_dir) en el momento de procesarla, así
+  # que no hay ninguna ruta que mantener sincronizada aquí.
+  poll_interval_seconds: 60    # cada cuánto se comprueba el progreso
+  torrent_wait_timeout_hours: 48   # si tarda más que esto, se avisa y se abandona
+
+# ============================================================
+# Overrides manuales (OPCIONAL): solo hace falta si el nombre de carpeta
+# derivado automáticamente del watch_title no coincide con el real (por
+# ejemplo, un título con un patrón de temporada muy raro). Si hay una entrada
+# aquí para un watch_title, tiene prioridad absoluta sobre el parser
+# automático.
+# ============================================================
+animes:
+#  - watch_title: "Nombre exacto tal como lo manda change-detection"
+#    folder: "/nuevo-pool/Anime/Nombre Real De La Carpeta/Temporada 2"
+  - watch_title: "JoJo no Kimyou na Bouken: Steel Ball Run - Japan-Paw! Descarga Calidad"
+    folder: "/nuevo-pool/Anime/Jojo's Bizarre Adventure/Steel Ball Run"
+  - watch_title: "[Oshi no Ko] 3rd Season"
+    folder: "/nuevo-pool/Anime/Oshi no Ko/"

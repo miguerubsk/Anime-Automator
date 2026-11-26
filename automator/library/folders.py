@@ -13,6 +13,7 @@ from ..notify.telegram import notify
 from . import files
 from .anilist import SeasonResolver, page_facts, split_title
 from .emision import EmisionLinker
+from .overrides import override_for
 from .naming import clean_subtitle, folder_safe, name_key, split_season
 
 log = logging.getLogger("anime-automator")
@@ -28,10 +29,8 @@ class SeasonLayout:
 
 def find_override(cfg: dict, watch_title: str) -> Path | None:
     """Carpeta fijada a mano en config.yaml (animes:) para ese watch_title."""
-    for a in cfg.get("animes") or []:
-        if a["watch_title"].strip() == watch_title.strip():
-            return Path(a["folder"])
-    return None
+    found = override_for(cfg, watch_title)
+    return Path(found["folder"]) if found else None
 
 
 def season_layout(cfg: dict, watch_title: str, page_text: str = "") -> SeasonLayout:

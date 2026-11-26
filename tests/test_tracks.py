@@ -1,4 +1,6 @@
+import subprocess
 import unittest
+from unittest import mock
 
 from automator.media.mkv import Remuxer
 from automator.media.tracks import JapanPawTrackPolicy, StrictTrackPolicy
@@ -47,6 +49,28 @@ class TrackPolicyTest(unittest.TestCase):
         self.assertEqual(cmd, ["mkvmerge", "-o", "out.mkv", "--audio-tracks", "1", "--subtitle-tracks", "2",
                                "--track-name", "0:", "--track-name", "1:", "--track-name", "2:", "--title", "",
                                "--default-track-flag", "1:1", "--default-track-flag", "2:1", "in.mkv"])
+
+
+    def test_remux_accepts_mkvmerge_warnings_but_not_errors(self):
+        """mkvmerge sale con 1 si solo hubo avisos (el archivo vale) y con 2 si falló."""
+        info = {"tracks": [track(0, "video"), track(1, "audio", "jpn"), track(2, "subtitles", "spa")]}
+        sel = JapanPawTrackPolicy().select(info, CFG)
+        def run(code, out):
+            def fake(cmd, capture_output=False, text=False, **kw):
+                # sin capturar la salida (como texto) no habría nada que dejar en el log
+                got = out if capture_output and text else None
+                return subprocess.CompletedProcess(cmd, code, stdout=got, stderr="" if got else None)
+            return mock.patch("automator.media.mkv.subprocess.run", side_effect=fake)
+
+        with run(1, "Warning: 267 bytes of invalid data"), self.assertLogs("anime-automator", "WARNING") as logs:
+            Remuxer().remux("in.mkv", "out.mkv", sel)  # no lanza
+        self.assertIn("267 bytes of invalid data", "\n".join(logs.output))
+        with run(0, "todo bien"), self.assertNoLogs("anime-automator", "WARNING"):
+            Remuxer().remux("in.mkv", "out.mkv", sel)
+        with run(2, "Error: no space left"), self.assertLogs("anime-automator", "ERROR") as logs, \
+                self.assertRaisesRegex(subprocess.CalledProcessError, "exit status 2"):
+            Remuxer().remux("in.mkv", "out.mkv", sel)
+        self.assertIn("no space left", "\n".join(logs.output))
 
 
 def text_sub(tid, lang=""):

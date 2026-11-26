@@ -11,6 +11,7 @@ import re
 from pathlib import Path
 
 from . import files
+from .overrides import override_for
 from .naming import folder_safe, name_key, norm_words, trim_name
 
 MOVIE_MARKER_RE = re.compile(r"\b(?:the\s+)?(?:movie|gekijou?ban|pel[ií]cula|film)\b", re.IGNORECASE)
@@ -49,10 +50,10 @@ class MovieLibrary:
         palabras completas y quedándose con la coincidencia más larga. Se
         respetan también los overrides de config.yaml.
         """
+        found = override_for(self.cfg, title)
+        if found:
+            return files.base_of(Path(found["folder"]))
         words = norm_words(title)
-        override = self._override_where(lambda watch_title: norm_words(watch_title) == words)
-        if override is not None:
-            return override
         # claves de cada principio del título que acaba en palabra completa:
         # "Dandadan Movie" -> {"dandadan": 1}; así "Dan Da Dan" también casa
         prefixes = {}
@@ -71,17 +72,10 @@ class MovieLibrary:
         key = name_key(series)
         if len(key) < 4:
             return None
-        override = self._override_where(lambda watch_title: name_key(watch_title) == key)
-        if override is not None:
-            return override
+        found = override_for(self.cfg, series)
+        if found:
+            return files.base_of(Path(found["folder"]))
         return next((d for d in self._series_dirs() if name_key(d.name) == key), None)
-
-    def _override_where(self, same) -> Path | None:
-        """Carpeta de la serie del primer override de config.yaml cuyo watch_title cumple `same`."""
-        for a in self.cfg.get("animes") or []:
-            if same(a["watch_title"]):
-                return files.base_of(Path(a["folder"]))
-        return None
 
     def _series_dirs(self) -> list[Path]:
         """Carpetas de la biblioteca salvo la de películas ([] si no se puede leer)."""
@@ -100,7 +94,8 @@ class MovieLibrary:
         """
         series_folder = self.find_series_folder(title)
         if series_folder is not None:
-            return series_folder, movie_file_name(title), True
+            found = override_for(self.cfg, title) or {}
+            return series_folder, found.get("file") or movie_file_name(title), True
         series_folder = self.folder_named(series) if series else None
         if series_folder is not None:
             name = movie_file_name(title)

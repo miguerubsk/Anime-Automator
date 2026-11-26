@@ -46,13 +46,14 @@ class Job:
     pending: set = field(default_factory=set)
     done: list = field(default_factory=list)
     failed: list = field(default_factory=list)
+    cancelled: list = field(default_factory=list)   # quitados de la cola a mano
     sealed: bool = False      # ya no se le van a añadir más capítulos
     finished: bool = False    # ya se ha enviado job_complete
     watch_url: str = ""       # trabajo observado (webhook): no sustituye a los avisos propios
 
     @property
     def total(self) -> int:
-        return len(self.pending) + len(self.done) + len(self.failed)
+        return len(self.pending) + len(self.done) + len(self.failed) + len(self.cancelled)
 
     def to_dict(self) -> dict:
         return {**asdict(self), "pending": sorted(self.pending)}
@@ -164,6 +165,29 @@ class JobTracker(metaclass=Singleton):
             self._save_locked()
         return not job.watch_url
 
+    def cancel(self, keys) -> None:
+        """
+        Capítulos quitados de la cola a mano: un solo aviso por trabajo con
+        todos ellos («episodes_cancelled»), o ninguno si con eso el trabajo
+        termina (lo lleva job_complete, en «cancelled»).
+        """
+        with self._lock:
+            by_job: dict[str, tuple[Job, list]] = {}
+            for key in keys:
+                job = self._by_key.pop(key, None)
+                if job is None:
+                    continue
+                job.pending.discard(key[1])
+                job.cancelled.append(key[1])
+                by_job.setdefault(job.job_id, (job, []))[1].append(key[1])
+            for job, eps in by_job.values():
+                if job.sealed and not job.pending:
+                    self._maybe_finish(job)
+                else:
+                    self._emit(job, "episodes_cancelled", episodes=sorted(eps), done=len(job.done),
+                               failed=len(job.failed), total=job.total)
+            self._save_locked()
+
     def _emit(self, job: Job, event: str, **data):
         if data.get("error"):
             data["error"] = display_path(data["error"], keep_code=False)
@@ -176,7 +200,7 @@ class JobTracker(metaclass=Singleton):
         if job.sealed and not job.pending and not job.finished:
             job.finished = True
             self._emit(job, "job_complete", done=sorted(job.done), failed=sorted(job.failed),
-                       total=len(job.done) + len(job.failed))
+                       cancelled=sorted(job.cancelled), total=job.total)
 
     # ---------------- persistencia ----------------
     def _save_locked(self):
