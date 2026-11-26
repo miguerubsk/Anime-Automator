@@ -94,6 +94,23 @@ class FailureChainTest(AutomatorTestCase):
         self.assertLessEqual(RetryScheduler().entries()[0].retry_at, __import__("time").time())
         self.assertTrue(any(f"procesado y guardado en:\n{self.root}/Anime/Uno/01.mkv" in s for s in self.sent))
 
+    def test_replacements_are_told_once_the_folder_is_done(self):
+        from automator.library.quality import Replacement
+        from automator.pipeline.registry import InProgress
+        from automator.pipeline.replacements import ReplacementDigest
+        from automator.pipeline.worker import Finisher
+        item2 = self.item("Uno", 2, page_url="https://paste.japan-paw.net/?v=1")
+        InProgress().add(item2.key)
+        for it in (self.item1, item2):
+            ReplacementDigest().add(it.group, Replacement("Anime/Uno", it.episode, f"0{it.episode}.mkv", 1080,
+                                                          [(f"0{it.episode}.mp4", 480)], []))
+        Finisher().finish(self.cfg, self.item1, dest=self.root / "Anime" / "Uno" / "01.mkv")
+        self.assertFalse([s for s in self.sent if s.startswith("🧹")])     # aún queda el 2
+        Finisher().finish(self.cfg, item2, dest=self.root / "Anime" / "Uno" / "02.mkv")
+        self.assertEqual([s for s in self.sent if s.startswith("🧹")],
+                         ["🧹 Anime/Uno: 2 capítulo(s) sustituidos por los .mkv (1080p): 1-2. "
+                          "Borradas las copias viejas (480p)."])
+
     def test_notifier_shows_user_paths(self):
         from automator.notify.telegram import Notifier
         self._patches[1].stop()  # el Notifier de verdad, pero sin red

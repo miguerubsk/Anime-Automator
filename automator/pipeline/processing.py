@@ -28,6 +28,7 @@ from ..media.mkv import Remuxer, mkv_track_info
 from ..sources.drive import DriveError, DriveMirror
 from ..media.tracks import JapanPawTrackPolicy, StrictTrackPolicy
 from .model import WorkItem
+from .replacements import ReplacementDigest
 
 log = logging.getLogger("anime-automator")
 
@@ -207,7 +208,9 @@ class EpisodeProcessor:
                 except Exception:
                     log.exception("Fallo reorganizando las temporadas de %s", base)
             try:
-                remove_lower_quality_copies(cfg, dest_file, lower_copies_for(item.target, item.episode, dest_file))
+                others = lower_copies_for(item.target, item.episode, dest_file)
+                episode = None if item.is_movie else item.episode
+                ReplacementDigest().add(item.group, remove_lower_quality_copies(cfg, dest_file, others, episode))
             except Exception:
                 log.exception("Fallo revisando copias de menor calidad de %s", dest_file)
             return dest_file

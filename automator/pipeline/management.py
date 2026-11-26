@@ -11,11 +11,13 @@ import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
+from ..core.config import load_config
 from .jobs import JobTracker
 from .model import WorkItem
 from .pending import PendingStore
 from .progress import BatchProgress
 from .registry import InProgress
+from .replacements import ReplacementDigest
 from .retries import RetryScheduler
 from .torrents import TorrentTracker
 from .work_queue import WorkQueue
@@ -101,6 +103,8 @@ def cancel_episodes(keys) -> int:
         PendingStore().remove(item)
         BatchProgress().cancelled(item.folder, item.episode)
     JobTracker().cancel([item.key for item in cancelled])
+    for group in {item.group for item in cancelled}:
+        ReplacementDigest().flush_if_idle(load_config(), group)
     PendingStore().persist()
     if cancelled:
         log.info("Cancelados desde el bot de administración: %s", [(i.name, i.episode) for i in cancelled])

@@ -17,6 +17,7 @@ from .model import WorkItem
 from .processing import EpisodeProcessor, TorrentFileSource
 from .progress import BatchProgress
 from .registry import Completed, InProgress
+from .replacements import ReplacementDigest
 from .reporting import report
 from .watches import WatchRegistry
 
@@ -216,6 +217,7 @@ class TorrentTracker(BackgroundLoop, metaclass=Singleton):
         if not item.is_movie:
             WatchRegistry().episode_done(item.target.get("page_url"), item.folder, item.episode)
         InProgress().discard(item.key)
+        ReplacementDigest().flush_if_idle(cfg, item.group)
         return True
 
     def _give_up(self, client, torrent_hash, tracked: TrackedTorrent, why: str, error: str, message):
@@ -223,6 +225,7 @@ class TorrentTracker(BackgroundLoop, metaclass=Singleton):
         BatchProgress().failed(item.folder, item.episode)
         report(item.key, "episode_failed", message, error=error)
         InProgress().discard(item.key)
+        ReplacementDigest().flush_if_idle(load_config(), item.group)
         Transmission.remove(client, torrent_hash, why)
         self.forget(torrent_hash)
 

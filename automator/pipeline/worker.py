@@ -25,6 +25,7 @@ from .processing import DRIVE, EpisodeProcessor, chosen_source, source_for
 from .progress import BatchProgress
 from .registry import Completed, InProgress
 from .reporting import report
+from .replacements import ReplacementDigest
 from .retries import RetryScheduler
 from .watches import WatchRegistry
 from .work_queue import WorkQueue
@@ -48,6 +49,7 @@ class Finisher(metaclass=Singleton):
         finally:
             if not disposition.keep_in_progress:
                 InProgress().discard(item.key)
+                ReplacementDigest().flush_if_idle(cfg, item.group)
             if not disposition.keep_pending:
                 # terminado (bien, mal o pasado a torrent, que tiene su propio
                 # estado persistente): ya no está pendiente

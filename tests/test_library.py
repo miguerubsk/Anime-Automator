@@ -461,10 +461,14 @@ class FakeMkvmerge:
 
 
 class LowerQualityTest(LibraryTestCase):
-    def remove(self, heights, dest, *others):
-        from automator.library.quality import remove_lower_quality_copies
+    def remove(self, heights, dest, *others, tell=True, episode=None):
+        """Quita las copias peores de `dest` y, con tell, cuenta lo hecho como se avisaría."""
+        from automator.library.quality import remove_lower_quality_copies, replacement_notices
         with mock.patch("automator.media.mkv.subprocess.run", FakeMkvmerge(heights)):
-            remove_lower_quality_copies(self.cfg, dest, list(others))
+            done = remove_lower_quality_copies(self.cfg, dest, list(others), episode)
+        if tell:
+            self.sent += replacement_notices([done] if done else [])
+        return done
 
     def setUp(self):
         super().setUp()
@@ -505,6 +509,21 @@ class LowerQualityTest(LibraryTestCase):
         s = self.show
         self.remove({"01.mkv": 1080}, s / "01.mkv", s / "01.mkv", s / "02.mp4")
         self.assertEqual(self.sent, [])
+
+    def test_a_whole_season_is_one_notice(self):
+        """Doce capítulos que sustituyen a sus copias viejas: un aviso, no doce."""
+        from automator.library.quality import replacement_notices
+        s = self.mk("Serie", files=[f"{n:02d}.{ext}" for n in (1, 2, 3, 5) for ext in ("mkv", "mp4")])
+        (s / "03.avi").write_text("x")
+        heights = {f"{n:02d}.mkv": 1080 for n in (1, 2, 3, 5)} | {f"{n:02d}.mp4": 480 for n in (1, 2, 5)}
+        heights |= {"03.mp4": 720, "03.avi": 1080}
+        done = [self.remove(heights, s / f"{n:02d}.mkv", *s.glob(f"{n:02d}.[ma][pv]*"), tell=False,
+                            episode=n)
+                for n in (1, 2, 3, 5)]
+        notices = replacement_notices(done)
+        self.assertEqual(notices, ["🧹 Anime/Serie: 4 capítulo(s) sustituidos por los .mkv (1080p): 1-3, 5. "
+                                   "Borradas las copias viejas (480p, 720p, 1080p)."])
+        self.assertEqual(sorted(f.name for f in s.iterdir()), ["01.mkv", "02.mkv", "03.mkv", "05.mkv"])
 
     def test_lower_copies_for(self):
         from automator.library.quality import lower_copies_for

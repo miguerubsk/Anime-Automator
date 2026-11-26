@@ -125,6 +125,21 @@ class ManagementTest(AutomatorTestCase):
         self.assertEqual([p["event"] for p in events], ["job_complete"])
         self.assertEqual((events[0]["cancelled"], events[0]["failed"], events[0]["done"]), ([1, 2], [], []))
 
+    def test_cancelling_the_rest_tells_the_replacements(self):
+        from automator.library.quality import Replacement
+        from automator.pipeline.management import cancel_episodes
+        from automator.pipeline.pending import PendingStore
+        from automator.pipeline.registry import InProgress
+        from automator.pipeline.replacements import ReplacementDigest
+        from automator.pipeline.work_queue import WorkQueue
+        PendingStore()
+        rest = self.item("Tres", 2)
+        InProgress().add(rest.key)
+        WorkQueue().put(rest)
+        ReplacementDigest().add(rest.group, Replacement("Anime/Tres", 1, "01.mkv", 1080, [("01.mp4", 480)], []))
+        cancel_episodes([rest.key])
+        self.assertEqual(self.sent, ["🧹 Anime/Tres: sustituido por <b>01.mkv</b> (1080p), borrado: 01.mp4 (480p)"])
+
     def test_cancelling_part_of_an_order_is_one_notice(self):
         from automator.pipeline.jobs import JobTracker
         from automator.pipeline.management import cancel_episodes
